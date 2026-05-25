@@ -2013,16 +2013,212 @@ textarea:focus {
     border-right: none;
     border-radius: 12px;
     margin-bottom: 14px;
+    box-shadow: none;
+  }
+
+  .sidebar-brand,
+  .sidebar-auth {
+    padding: 14px 12px;
   }
 
   .sidebar-nav {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 6px;
+    gap: 8px;
+  }
+
+  .sidebar-link {
+    padding: 12px 14px;
+    border-radius: 14px;
   }
 
   .container {
     max-width: 100%;
+    padding: 18px;
+  }
+
+  .content {
+    padding: 20px;
+  }
+
+  .info-table,
+  .details-row,
+  .sign-grid,
+  .report-controls,
+  .report-dialog .field-group,
+  .user-management-grid,
+  .user-form-grid,
+  .filters-grid {
+    grid-template-columns: 1fr;
+    gap: 14px;
+  }
+
+  .details-row > div:first-child {
+    grid-column: auto;
+  }
+
+  .section-header,
+  .user-table-header,
+  .dashboard-actions,
+  .confirm-actions,
+  .report-dialog .modal-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .action-buttons {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .action-buttons button,
+  .confirm-actions .button {
+    width: 100%;
+  }
+
+  .pr-table th,
+  .pr-table td,
+  .report-table th,
+  .report-table td,
+  .user-table th,
+  .user-table td {
+    padding: 10px 8px;
+    font-size: 0.9rem;
+  }
+
+  .table-wrap,
+  .report-table-wrap,
+  .report-dialog .report-table-container {
+    overflow-x: auto;
+  }
+
+  .report-table {
+    min-width: 100%;
+  }
+
+  .preview-meta {
+    grid-template-columns: 1fr;
+  }
+
+  .preview-signatures {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 768px) {
+  body {
+    padding: 10px;
+  }
+
+  .sidebar {
+    border-radius: 0;
+  }
+
+  .sidebar-brand {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .sidebar-title {
+    font-size: 1.4rem;
+  }
+
+  .sidebar-subtitle,
+  .sidebar-auth-info span {
+    font-size: 0.8rem;
+  }
+
+  .sidebar-auth-info strong {
+    font-size: 1rem;
+  }
+
+  .header {
+    flex-direction: column;
+    align-items: stretch;
+    text-align: left;
+    gap: 12px;
+  }
+
+  .header h1 {
+    font-size: 1.3rem;
+  }
+
+  .header p {
+    font-size: 0.95rem;
+  }
+
+  .pr-table th,
+  .pr-table td,
+  .report-table th,
+  .report-table td,
+  .user-table th,
+  .user-table td {
+    padding: 10px 7px;
+    font-size: 0.88rem;
+  }
+
+  .unit-input {
+    width: 100%;
+  }
+
+  .details-row input,
+  .details-row select,
+  .report-controls input,
+  .report-controls select,
+  .report-controls button {
+    padding: 10px;
+  }
+
+  .delete-item-btn,
+  .top-action-btn,
+  .button {
+    width: 100%;
+  }
+
+  .preview-content {
+    width: 98%;
+  }
+}
+
+@media (max-width: 560px) {
+  body {
+    padding: 8px;
+  }
+
+  .container {
+    padding: 14px;
+  }
+
+  .content {
+    padding: 16px;
+  }
+
+  .sidebar-nav {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar-link {
+    font-size: 0.95rem;
+  }
+
+  .pr-table th,
+  .pr-table td,
+  .report-table th,
+  .report-table td,
+  .user-table th,
+  .user-table td {
+    padding: 8px 6px;
+    font-size: 0.82rem;
+  }
+
+  .action-buttons button,
+  .confirm-actions .button {
+    padding: 12px 14px;
+  }
+
+  .preview-meta,
+  .preview-signatures {
+    grid-template-columns: 1fr;
   }
 }
 
