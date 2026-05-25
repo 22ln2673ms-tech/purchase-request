@@ -1,0 +1,676 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Purchase Request Form</title>
+  <script src="https://unpkg.com/jszip@3.10.1/dist/jszip.min.js"></script>
+  <script src="https://unpkg.com/file-saver@2.0.5/dist/FileSaver.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-firestore-compat.js"></script>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="authOverlay" class="auth-overlay">
+    <div class="auth-overlay-bg" aria-hidden="true">
+      <div class="auth-bg-circle auth-bg-circle-1"></div>
+      <div class="auth-bg-circle auth-bg-circle-2"></div>
+      <div class="auth-bg-wave"></div>
+    </div>
+    <div class="auth-panel">
+      <div class="auth-panel-header">
+        <div>
+          <h2>PhilHealth Purchase Request</h2>
+          <p>Sign in with your PRO1 or LHIO account.</p>
+        </div>
+        <span class="auth-badge">Secure</span>
+      </div>
+
+      <div class="auth-fields">
+        <label class="auth-label" for="authEmail">Email address</label>
+        <input id="authEmail" type="email" placeholder="name@office.gov.ph" autocomplete="username" />
+        <label class="auth-label" for="authPassword">Password</label>
+        <input id="authPassword" type="password" placeholder="Password" autocomplete="current-password" />
+      </div>
+
+      <button id="authSignInBtn" class="button button--primary auth-submit-btn">Sign In</button>
+    </div>
+  </div>
+
+  <div id="signOutConfirmModal" class="confirm-modal hidden" aria-hidden="true">
+    <div class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
+      <h2 id="confirmTitle">Confirm Sign Out</h2>
+      <p>Are you sure you want to sign out? You will need to log in again to continue using the system.</p>
+      <div class="confirm-actions">
+        <button id="cancelSignOutBtn" class="button button--ghost">Cancel</button>
+        <button id="confirmSignOutBtn" class="button button--danger">Sign Out</button>
+      </div>
+    </div>
+  </div>
+
+  <nav class="sidebar">
+    <div class="sidebar-auth">
+      <div class="sidebar-auth-info">
+        <strong id="authUserName">Guest</strong>
+        <span id="authUserEmail">Not signed in</span>
+      </div>
+    </div>
+    <div class="sidebar-brand">
+      <img src="assets/philhealth-logo.avif" alt="PhilHealth Logo" class="sidebar-logo">
+      <div>
+        <h3 class="sidebar-title">PhilHealth</h3>
+        <p class="sidebar-subtitle">Purchase Request System</p>
+      </div>
+    </div>
+
+    <p class="sidebar-label">Main Navigation</p>
+    <div class="sidebar-nav">
+      <a href="#dashboard" class="sidebar-link">Dashboard</a>
+      <a href="#records" class="sidebar-link">Records</a>
+      <a href="#archive" class="sidebar-link">Archive</a>
+      <a href="#new" class="sidebar-link active">New Request</a>
+      <a href="#users" class="sidebar-link admin-only">User Management</a>
+    </div>
+
+    <p class="sidebar-label">Support &amp; References</p>
+    <div class="sidebar-nav">
+      <a href="#help" class="sidebar-link">Help</a>
+    </div>
+    <div class="sidebar-logout">
+      <button id="logoutBtn" class="button button--secondary hidden">Sign Out</button>
+    </div>
+  </nav>
+
+  <section id="newRequestSection" class="container">
+    <div class="header-image-section">
+      <img src="assets/header.png" alt="PhilHealth Header" class="header-image-main">
+    </div>
+
+    <div class="content">
+      <form id="purchaseForm">
+        <!-- Area Selection Section -->
+        <div class="info-table area-panel">
+          <div class="info-group">
+            <label for="selectArea">Select LHIO</label>
+            <select id="selectArea" required>
+              <option value="">-- Select LHIO --</option>
+              <option value="table1.html?area=PhilHealth%20Regional%20Office">PhilHealth Regional Office</option>
+              <option value="table1.html?area=LHIO%20La%20Union">LHIO La Union</option>
+              <option value="table1.html?area=LHIO%20Ilocos%20Norte">LHIO Ilocos Norte</option>
+              <option value="table1.html?area=LHIO%20Ilocos%20Sur">LHIO Ilocos Sur</option>
+              <option value="table1.html?area=LHIO%20Western%20Pangasinan">LHIO Western Pangasinan</option>
+              <option value="table1.html?area=LHIO%20Eastern%20Pangasinan">LHIO Eastern Pangasinan</option>
+              <option value="table1.html?area=LHIO%20Central%20Pangasinan">LHIO Central Pangasinan</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="info-table">
+          <div class="info-group">
+            <label for="department">Department</label>
+            <select id="department" required>
+              <option value="">Select department</option>
+              <option value="ORVP">ORVP – Office of the Regional Vice President</option>
+              <option value="HCDMD">Health Care Delivery Management Division</option>
+              <option value="MSD">Management Services Division</option>
+              <option value="FOD">Field Operations Division</option>
+            </select>
+          </div>
+          <div class="info-group" >
+            <label for="prNumber">PR No.</label>
+            <input type="text" id="prNumber"  placeholder="" />
+          </div>
+          <div class="info-group">
+            <label for="prDate">Date</label>
+            <input type="text" id="prDate" readonly />
+          </div>
+        </div>
+
+        <div class="info-table">
+          <div class="info-group">
+            <label for="section">Section</label>
+            <select id="section" disabled>
+              <option value="">Select section</option>
+            </select>
+          </div>
+          <div class="info-group">
+            <label for="agency">Agency</label>
+            <input type="text" id="agency" value="PhilHealth Regional Office 1" readonly />
+          </div>
+          <div class="info-group">
+            <label for="saiNumber">SAI No.</label>
+            <input type="text" id="saiNumber" placeholder="" />
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table class="pr-table">
+            <thead>
+              <tr>
+                <th>Stock No.</th>
+                <th class="col-unit">Unit</th>
+                <th colspan="2">Item Description</th>
+                <th>Qty</th>
+                <th>Unit Cost</th>
+                <th>Total Cost</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody id="itemsTableBody">
+              <tr class="item-row">
+                <td class="center">-</td>
+                <td>
+                  <input type="text" class="unit-input" value="pc" />
+                </td>
+                <td colspan="2">
+                  <div class="details-row">
+                    <div>
+                      <label>Item Description</label>
+                      <input type="text" class="itemDescription" value="Tarpaulin Backdrop/Banner Stand" />
+                    </div>
+                    <div>
+                      <label>Width</label>
+                      <input type="number" class="width-input" value="2" min="1" max="99" step="1" />
+                    </div>
+                    <div>
+                      <label>Height</label>
+                      <input type="number" class="height-input" value="2" min="1" max="99" step="1" />
+                    </div>
+                    <div>
+                      <label>Unit of Measure</label>
+                      <select class="unitMeasure-select">
+                        <option value="ft">Feet</option>
+                        <option value="in">Inches</option>
+                        <option value="cm">Centimeter</option>
+                        <option value="m">Meter</option>
+                      </select>
+                    </div>
+                  </div>
+                </td>
+                <td>
+                  <input type="number" class="quantity-input" value="1" min="1" step="1" />
+                </td>
+                <td>
+                  <input type="text" class="unitCost-input" readonly />
+                </td>
+                <td>
+                  <input type="text" class="totalCost-input" readonly />
+                </td>
+                <td class="center">
+                  <button type="button" class="delete-item-btn">Delete</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div style="margin-top: 12px; margin-bottom: 20px;">
+          <button type="button" id="addItemBtn">+ Add Item</button>
+        </div>
+
+        <div class="table-wrap" style="margin-top: 12px;">
+          <table class="pr-table">
+            <tbody>
+              <tr>
+                <td colspan="7" style="padding: 18px;">
+                  <div class="details-row">
+                    <div>
+                      <label for="pricePerSqFt">Price per sq. ft.</label>
+                      <input type="number" id="pricePerSqFt" value="15" min="0" step="0.01" />
+                    </div>
+                  </div>
+                </td>
+              </tr>
+              <tr>
+                <td colspan="7" class="right grand-display">Grand Total: <span id="grandTotal">₱0.00</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="purpose-box">
+          <label for="purpose">Purpose</label>
+          <textarea id="purpose">To be used as tarpaulin backdrop/banner stand for PhilHealth marketing activities/events.</textarea>
+        </div>
+
+        <div class="sign-grid">
+          <div class="sign-box">
+            <label for="requestedBySignature">Requested by</label>
+            <input type="text" id="requestedBySignature" placeholder="[Signature]" />
+            <strong>Printed Name</strong>
+           <input type="text" id="requestedByName" value="JOSEPH A. MANUEL" />
+            <strong>Designation</strong>
+            <input type="text" id="requestedByDesignation" value="PRO III / Head, Public Affairs Unit" />
+          </div>
+          <div class="sign-box">
+            <label for="recommendedBySignature">Recommended by</label>
+            <input type="text" id="recommendedBySignature" placeholder="[Signature]" />
+            <strong>Printed Name</strong>
+            <input type="text" id="recommendedByName" value="CHESTER JOSEPH C. CANTO" />
+            <strong>Designation</strong>
+            <input type="text" id="recommendedByDesignation" value="Head, GSU" />
+          </div>
+          <div class="sign-box">
+            <label for="approvedBySignature">Approved by</label>
+            <input type="text" id="approvedBySignature" placeholder="[Signature]" />
+            <strong>Printed Name</strong>
+            <input type="text" id="approvedByName" value="CYNTHIA S. SANTOS, DPA" />
+            <strong>Designation</strong>
+            <input type="text" id="approvedByDesignation" value="Head, MSD" />
+          </div>
+        </div>
+
+        <div class="action-buttons">
+          <button type="button" id="saveBtn" class="button button--primary">Save</button>
+          <button type="button" id="cancelEditBtn" class="button button--secondary hidden">Cancel Edit</button>
+          <button type="button" id="exportBtn" class="button button--accent">Export</button>
+          <button type="button" id="printBtn" class="button button--accent">Print</button>
+          <button type="button" id="addFooterBtn" class="button button--secondary">Add Footer</button>
+        </div>
+      </form>
+    </div>
+  </section>
+
+  <section id="dashboardSection" class="container hidden">
+    <div class="dashboard-top-actions">
+      <a href="#new" class="top-action-btn">+ New Request</a>
+    </div>
+
+    <div class="summary-grid">
+      <div class="card total">
+        <div class="card-label">Total Purchase Value</div>
+        <div class="card-number" id="totalValue">₱0.00</div>
+        <div class="card-description">Total amount of all requests</div>
+      </div>
+      <div class="card pending">
+        <div class="card-label">Total Requests</div>
+        <div class="card-number" id="totalCount">0</div>
+        <div class="card-description">All purchase requests</div>
+      </div>
+      <div class="card approved">
+        <div class="card-label">Departments</div>
+        <div class="card-number" id="departmentCount">0</div>
+        <div class="card-description">Active departments</div>
+      </div>
+      <div class="card rejected">
+        <div class="card-label">Monthly Trend</div>
+        <div class="card-description">View chart below</div>
+      </div>
+    </div>
+
+    <div class="navigation-section">
+      <h3 class="section-title">Monthly Purchase Requests Trend</h3>
+      <div class="chart-panel">
+        <canvas id="monthlyChart"></canvas>
+      </div>
+    </div>
+
+    <div class="filters-section">
+      <h3 class="filters-title">Filter & Search</h3>
+      <div class="filters-grid">
+        <div class="filter-group">
+          <label for="branchFilter">Branch</label>
+          <select id="branchFilter">
+            <option value="">All Branches</option>
+            <option value="PhilHealth Regional Office">PhilHealth Regional Office</option>
+            <option value="LHIO Ilocos Norte">LHIO Ilocos Norte</option>
+            <option value="LHIO Ilocos Sur">LHIO Ilocos Sur</option>
+            <option value="LHIO La Union">LHIO La Union</option>
+            <option value="LHIO Eastern Pangasinan">LHIO Eastern Pangasinan</option>
+            <option value="LHIO Western Pangasinan">LHIO Western Pangasinan</option>
+            <option value="LHIO Central Pangasinan">LHIO Central Pangasinan</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <div class="navigation-section">
+      <h3 class="section-title">Saved PR Records</h3>
+      <div class="report-controls">
+        <input id="dashboardSearchBox" type="text" placeholder="Search Item Description Title" />
+        <select id="dashboardMonthFilter">
+          <option value="">All Months</option>
+          <option value="01">January</option>
+          <option value="02">February</option>
+          <option value="03">March</option>
+          <option value="04">April</option>
+          <option value="05">May</option>
+          <option value="06">June</option>
+          <option value="07">July</option>
+          <option value="08">August</option>
+          <option value="09">September</option>
+          <option value="10">October</option>
+          <option value="11">November</option>
+          <option value="12">December</option>
+        </select>
+        <select id="dashboardYearFilter">
+          <option value="">All Years</option>
+        </select>
+      </div>
+      <div class="report-table-wrap">
+        <table class="report-table" id="dashboardRecordsTable">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Date</th>
+              <th>Item Description Title</th>
+              <th>Item Size</th>
+              <th>Quantity</th>
+              <th>Amount (₱)</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="dashboardRecordsTableBody">
+            <tr>
+              <td colspan="7" class="empty-state">
+                <div class="empty-state-icon"></div>
+                <p>No records found</p>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="dashboard-actions">
+        <button id="saveReportBtn" class="button button--primary">Save Report</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="recordsSection" class="container hidden">
+    <div class="section-card">
+      <div class="section-header">
+        <div>
+          <h2>Purchase Request Records</h2>
+          <p>View active requests, search by PR number, and manage your saved records.</p>
+        </div>
+      </div>
+      <div class="report-controls">
+        <input id="recordsSearchBox" type="text" placeholder="Search PR Number, Branch or Item" />
+        <select id="recordsBranchFilter">
+          <option value="">All Branches</option>
+          <option value="PhilHealth Regional Office">PhilHealth Regional Office</option>
+          <option value="LHIO Ilocos Norte">LHIO Ilocos Norte</option>
+          <option value="LHIO Ilocos Sur">LHIO Ilocos Sur</option>
+          <option value="LHIO La Union">LHIO La Union</option>
+          <option value="LHIO Eastern Pangasinan">LHIO Eastern Pangasinan</option>
+          <option value="LHIO Western Pangasinan">LHIO Western Pangasinan</option>
+          <option value="LHIO Central Pangasinan">LHIO Central Pangasinan</option>
+        </select>
+        <select id="recordsYearFilter">
+          <option value="">All Years</option>
+        </select>
+      </div>
+      <div class="report-table-wrap">
+          <table class="report-table" id="recordsTable">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Branch</th>
+              <th>Item</th>
+              <th>Size</th>
+              <th>Amount (₱)</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="recordsTableBody">
+            <tr>
+              <td colspan="6" class="empty-state">
+                <div class="empty-state-icon"></div>
+                <p>No records available</p>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section id="archiveSection" class="container hidden">
+    <div class="section-card">
+      <div class="section-header">
+        <div>
+          <h2>Archived Records</h2>
+          <p>Restore archived purchase requests or review recently archived items.</p>
+        </div>
+      </div>
+      <div class="report-controls">
+        <input id="archiveSearchBox" type="text" placeholder="Search by branch or item" />
+        <select id="archiveBranchFilter">
+          <option value="">All Branches</option>
+          <option value="PhilHealth Regional Office">PhilHealth Regional Office</option>
+          <option value="LHIO Ilocos Norte">LHIO Ilocos Norte</option>
+          <option value="LHIO Ilocos Sur">LHIO Ilocos Sur</option>
+          <option value="LHIO La Union">LHIO La Union</option>
+          <option value="LHIO Eastern Pangasinan">LHIO Eastern Pangasinan</option>
+          <option value="LHIO Western Pangasinan">LHIO Western Pangasinan</option>
+          <option value="LHIO Central Pangasinan">LHIO Central Pangasinan</option>
+        </select>
+        <select id="archiveYearFilter">
+          <option value="">All Years</option>
+        </select>
+      </div>
+      <div class="report-table-wrap">
+        <table class="report-table" id="archiveTable">
+          <thead>
+            <tr>
+              <th>Archived Date</th>
+              <th>Branch</th>
+              <th>Item</th>
+              <th>Item Size</th>
+              <th>Amount (₱)</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="archiveTableBody">
+            <tr>
+              <td colspan="6" class="empty-state">
+                <div class="empty-state-icon"></div>
+                <p>No archived records found</p>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section id="usersSection" class="container hidden">
+    <div class="section-card">
+      <div class="section-header">
+        <div>
+          <h2>User Management</h2>
+          <p>Admin-only panel for creating officer accounts and handling password reset requests.</p>
+        </div>
+      </div>
+      <div class="user-management-grid">
+        <div class="user-panel">
+          <h3>Create Officer Account</h3>
+          <div class="user-form-grid">
+            <div>
+              <label for="newUserName">Full Name</label>
+              <input id="newUserName" type="text" placeholder="e.g. Juan dela Cruz" />
+            </div>
+            <div>
+              <label for="newUserEmail">Email Address</label>
+              <input id="newUserEmail" type="email" placeholder="officer@philhealth.gov" />
+            </div>
+            <div>
+              <label for="newUserPassword">Password</label>
+              <input id="newUserPassword" type="password" placeholder="Minimum 6 characters" />
+            </div>
+            <div>
+              <label for="newUserRole">Role</label>
+              <select id="newUserRole">
+                <option value="user">User</option>
+                <option value="admin">Admin</option>
+              </select>
+            </div>
+            <div>
+              <label for="newUserOffice">Office</label>
+              <select id="newUserOffice">
+                <option value="PhilHealth Regional Office 1 (PRO 1)">PhilHealth Regional Office 1 (PRO 1)</option>
+                <option value="LHIO Ilocos Norte">LHIO Ilocos Norte</option>
+                <option value="LHIO Ilocos Sur">LHIO Ilocos Sur</option>
+                <option value="LHIO La Union">LHIO La Union</option>
+                <option value="LHIO Eastern Pangasinan">LHIO Eastern Pangasinan</option>
+                <option value="LHIO Western Pangasinan">LHIO Western Pangasinan</option>
+                <option value="LHIO Central Pangasinan">LHIO Central Pangasinan</option>
+              </select>
+            </div>
+          </div>
+          <div class="user-form-actions">
+            <button id="createUserBtn" class="button button--primary">Create Account</button>
+            <button id="refreshUsersBtn" class="button button--secondary">Refresh List</button>
+          </div>
+          <div id="userManagementMessage" class="user-message hidden"></div>
+        </div>
+        <div class="user-panel">
+          <h3>Officer Accounts</h3>
+          <div class="user-table-header">
+            <div class="report-controls">
+              <input id="userSearchBox" type="text" placeholder="Search officers by name or email" />
+            </div>
+            <div class="user-count" id="userCountInfo">0 officers</div>
+          </div>
+          <div class="report-table-wrap">
+            <table class="report-table user-table" id="userAccountsTable">
+              <thead>
+                <tr>
+                  <th>Full Name</th>
+                  <th>Email Address</th>
+                  <th>Role</th>
+                  <th>Office</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody id="userAccountsTableBody">
+                <tr>
+                  <td colspan="5" class="empty-state">
+                    <div class="empty-state-icon"></div>
+                    <p>No officer accounts found yet.</p>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            <div class="user-pagination">
+              <button id="userPrevPageBtn" class="button button--ghost" type="button">Previous</button>
+              <span id="userPaginationInfo">Page 1 of 1</span>
+              <button id="userNextPageBtn" class="button button--ghost" type="button">Next</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="helpSection" class="container hidden">
+    <div class="section-card">
+      <div class="section-header">
+        <div>
+          <h2>Help & Instructions</h2>
+          <p>Quick guidance for using the Purchase Request system.</p>
+        </div>
+      </div>
+      <div class="help-panel">
+        <div class="help-item">
+          <h3>New Request</h3>
+          <p>Fill in the form, select the LHIO, complete item details, and save. The request will appear in Records automatically.</p>
+        </div>
+        <div class="help-item">
+          <h3>Dashboard</h3>
+          <p>Monitor totals, trends, and active departments. Use filters to drill into branches, months, and years.</p>
+        </div>
+        <div class="help-item">
+          <h3>Records</h3>
+          <p>Search, view, edit, or archive active purchase requests. The Records page shows your current saved requests.</p>
+        </div>
+        <div class="help-item">
+          <h3>Archive</h3>
+          <p>Restore a previously archived record back into active records. Archived items are kept for easy recovery.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div id="reportModal" class="report-modal">
+    <div class="report-dialog">
+      <div class="modal-header">
+        <h2>Purchase Request Report</h2>
+      </div>
+      <div class="field-group">
+        <div>
+          <label for="reportFilterType">Filter Type</label>
+          <select id="reportFilterType">
+            <option value="all">Whole Year</option>
+            <option value="month">By Month</option>
+          </select>
+        </div>
+        <div>
+          <label for="reportYearFilter">Year</label>
+          <select id="reportYearFilter">
+            <option value="">All Years</option>
+          </select>
+        </div>
+        <div id="monthFilterContainer" style="display:none;">
+          <label for="reportMonthFilter">Month</label>
+          <select id="reportMonthFilter">
+            <option value="">Select Month</option>
+            <option value="01">January</option>
+            <option value="02">February</option>
+            <option value="03">March</option>
+            <option value="04">April</option>
+            <option value="05">May</option>
+            <option value="06">June</option>
+            <option value="07">July</option>
+            <option value="08">August</option>
+            <option value="09">September</option>
+            <option value="10">October</option>
+            <option value="11">November</option>
+            <option value="12">December</option>
+          </select>
+        </div>
+      </div>
+      <div id="reportTableContainer" class="report-table-container">
+        <table class="modal-table">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Item Description Title</th>
+              <th>Item Size</th>
+              <th>Quantity</th>
+              <th style="text-align: right;">Amount (₱)</th>
+            </tr>
+          </thead>
+          <tbody id="reportTableBody"></tbody>
+          <tfoot>
+            <tr>
+              <td colspan="4" style="text-align: right;">TOTAL</td>
+              <td id="reportTotal" style="text-align: right;">₱0.00</td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+      <div class="modal-actions">
+        <button type="button" id="reportCopyTableBtn" class="button button--primary">Copy Table</button>
+        <button type="button" id="reportCloseFooterBtn" class="button button--secondary">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Preview Modal -->
+  <div id="previewModal" class="preview-modal" onclick="if(event.target === this) this.classList.remove('active')">
+    <div id="previewContent" class="preview-content"></div>
+  </div>
+
+  <!-- Footer -->
+  <div id="footerContainer" class="footer-container hidden">
+    <img src="assets/footer.png" alt="Footer" class="footer-image" />
+  </div>
+
+  <script src="firebase-config.js"></script>
+  <script src="script.js"></script>
+</body>
+</html>
