@@ -472,7 +472,13 @@ function applyRBACRules() {
   }
 
   document.querySelectorAll('.admin-only').forEach(el => {
-    el.style.display = isAdmin ? '' : 'none';
+    if (isAdmin) {
+      el.classList.remove('hidden');
+      try { el.style.display = ''; } catch (e) {}
+    } else {
+      el.classList.add('hidden');
+      try { el.style.display = 'none'; } catch (e) {}
+    }
   });
 
   setUserLockedOffice();
@@ -796,12 +802,7 @@ function applyDashboardAuthorization() {
 function updateRecordsFiltersForUser() {
   const recordsBranchFilter = document.getElementById('recordsBranchFilter');
   if (!recordsBranchFilter) return;
-  if (isStandardUser()) {
-    recordsBranchFilter.value = getAssignedOfficeLabel();
-    recordsBranchFilter.disabled = true;
-  } else {
-    recordsBranchFilter.disabled = false;
-  }
+  recordsBranchFilter.disabled = false;
 }
 
 const departmentSelect = document.getElementById('department');
@@ -1819,9 +1820,16 @@ function initDashboard() {
 
 function initRecords() {
   const allRecords = getDatabaseRecords();
-  const filteredRecords = isStandardUser()
-    ? allRecords.filter(record => getRecordBranch(record) === getAssignedOfficeLabel())
-    : allRecords;
+  let filteredRecords = allRecords;
+
+  // Restrict standard users to only see records for their assigned office
+  if (isStandardUser() && currentUserProfile && currentUserProfile.office) {
+    const userOffice = String(currentUserProfile.office).toLowerCase().trim();
+    filteredRecords = allRecords.filter(record => {
+      const branch = (getRecordBranch(record) || '').toLowerCase().trim();
+      return branch === userOffice;
+    });
+  }
 
   updateRecordsYearFilter(filteredRecords);
   updateRecordsFiltersForUser();
@@ -1888,7 +1896,8 @@ function renderRecordsTable(records) {
 
   tbody.innerHTML = records.map(record => {
     const recordId = record.id || cleanPrNumber(record.prNumber);
-    const amount = parseFloat(record.grandTotal?.replace(/[₱,]/g, '') || '0') || 0;
+    const amountString = record.grandTotal || record.cost || '₱0.00';
+    const amount = parseFloat(amountString.replace(/[₱,]/g, '') || '0') || 0;
     const branch = getRecordBranch(record) || '-';
     const departmentLabel = resolveDepartmentLabel(record.department || record.departmentCode) || '-';
     const sizeLabel = formatRecordSize(record);
@@ -1928,6 +1937,15 @@ function filterRecords() {
   const yearValue = document.getElementById('recordsYearFilter')?.value || '';
 
   let records = getDatabaseRecords();
+
+  // If standard user, limit records to their assigned office only
+  if (isStandardUser() && currentUserProfile && currentUserProfile.office) {
+    const userOffice = String(currentUserProfile.office).toLowerCase().trim();
+    records = records.filter(record => {
+      const branch = (getRecordBranch(record) || '').toLowerCase().trim();
+      return branch === userOffice;
+    });
+  }
 
   if (searchValue) {
     records = records.filter(record => {
@@ -1993,7 +2011,8 @@ function renderArchiveTable(records) {
 
   tbody.innerHTML = records.map(record => {
     const recordId = record.id || cleanPrNumber(record.prNumber);
-    const amount = parseFloat(record.grandTotal?.replace(/[₱,]/g, '') || '0') || 0;
+    const amountString = record.grandTotal || record.cost || '₱0.00';
+    const amount = parseFloat(amountString.replace(/[₱,]/g, '') || '0') || 0;
     const branch = getRecordBranch(record) || '-';
     const archivedAt = record.archivedAt ? new Date(record.archivedAt).toLocaleDateString('en-PH') : '-';
     const itemSize = formatRecordSize(record);
@@ -2076,7 +2095,8 @@ function permanentlyDeleteArchived(recordId) {
 
 function updateSummaryCards(records = []) {
   const totalValue = records.reduce((sum, record) => {
-    const grandTotal = parseFloat(record.grandTotal?.replace(/[₱,]/g, '') || '0') || 0;
+    const amountString = record.grandTotal || record.cost || '₱0.00';
+    const grandTotal = parseFloat(amountString.replace(/[₱,]/g, '') || '0') || 0;
     return sum + grandTotal;
   }, 0);
   const departments = new Set(records.map(r => resolveDepartmentLabel(r.department || r.departmentCode || 'Unknown')));
@@ -2162,10 +2182,26 @@ function renderMonthlyChart(records) {
 }
 
 function getRecordBranch(record) {
+  if (!record) return '';
   if (record.selectedAreaLabel) return record.selectedAreaLabel;
-  if (record.selectedArea && branchMapping[record.selectedArea]) {
-    return branchMapping[record.selectedArea];
+
+  const selectedArea = record.selectedArea;
+  if (selectedArea) {
+    try {
+      const url = new URL(selectedArea, window.location.origin);
+      const areaParam = url.searchParams.get('area');
+      if (areaParam) {
+        return decodeURIComponent(areaParam);
+      }
+    } catch (e) {
+      // selectedArea may not be a full URL; attempt to extract area manually
+      const match = selectedArea.match(/[?&]area=([^&]+)/);
+      if (match && match[1]) {
+        return decodeURIComponent(match[1]);
+      }
+    }
   }
+
   return record.area || '';
 }
 
