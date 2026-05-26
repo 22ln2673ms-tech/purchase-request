@@ -54,12 +54,11 @@
   <nav class="sidebar">
     <div class="sidebar-auth">
       <div class="sidebar-auth-info">
-        <strong id="authUserName">Guest</strong>
-        <span id="authUserEmail">Not signed in</span>
+        <strong id="authUserName"></strong>
+        <span id="authUserEmail">Please sign in</span>
       </div>
     </div>
     <div class="sidebar-brand">
-      <img src="assets/philhealth-logo.avif" alt="PhilHealth Logo" class="sidebar-logo">
       <div>
         <h3 class="sidebar-title">PhilHealth</h3>
         <p class="sidebar-subtitle">Purchase Request System</p>
@@ -169,7 +168,7 @@
                   <div class="details-row">
                     <div>
                       <label>Item Description</label>
-                      <input type="text" class="itemDescription" value="Tarpaulin Backdrop/Banner Stand" />
+                      <input type="text" class="itemDescription" placeholder="Enter item description" />
                     </div>
                     <div>
                       <label>Width</label>
@@ -264,13 +263,15 @@
         </div>
 
         <div class="action-buttons">
+          <button type="button" id="addFooterBtn" class="button button--secondary">Add Footer</button>
+          <button type="button" id="printBtn" class="button button--accent">Check Preview</button>
           <button type="button" id="saveBtn" class="button button--primary">Save</button>
           <button type="button" id="cancelEditBtn" class="button button--secondary hidden">Cancel Edit</button>
-          <button type="button" id="exportBtn" class="button button--accent">Export</button>
-          <button type="button" id="printBtn" class="button button--accent">Print</button>
-          <button type="button" id="addFooterBtn" class="button button--secondary">Add Footer</button>
         </div>
       </form>
+      <div id="footerContainer" class="footer-container hidden">
+        <img src="assets/footer.png" alt="Footer" class="footer-image" />
+      </div>
     </div>
   </section>
 
@@ -408,6 +409,7 @@
           <thead>
             <tr>
               <th>Date</th>
+              <th>Department</th>
               <th>Branch</th>
               <th>Item</th>
               <th>Size</th>
@@ -417,7 +419,7 @@
           </thead>
           <tbody id="recordsTableBody">
             <tr>
-              <td colspan="6" class="empty-state">
+              <td colspan="7" class="empty-state">
                 <div class="empty-state-icon"></div>
                 <p>No records available</p>
               </td>
@@ -663,11 +665,6 @@
   <!-- Preview Modal -->
   <div id="previewModal" class="preview-modal" onclick="if(event.target === this) this.classList.remove('active')">
     <div id="previewContent" class="preview-content"></div>
-  </div>
-
-  <!-- Footer -->
-  <div id="footerContainer" class="footer-container hidden">
-    <img src="assets/footer.png" alt="Footer" class="footer-image" />
   </div>
 
   <script src="firebase-config.js"></script>
