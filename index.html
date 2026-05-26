@@ -93,9 +93,9 @@
         <!-- Area Selection Section -->
         <div class="info-table area-panel">
           <div class="info-group">
-            <label for="selectArea">Select LHIO</label>
+            <label for="selectArea">Header</label>
             <select id="selectArea" required>
-              <option value="">-- Select LHIO --</option>
+              <option value="">-- Header --</option>
               <option value="table1.html?area=PhilHealth%20Regional%20Office">PhilHealth Regional Office</option>
               <option value="table1.html?area=LHIO%20La%20Union">LHIO La Union</option>
               <option value="table1.html?area=LHIO%20Ilocos%20Norte">LHIO Ilocos Norte</option>
@@ -120,7 +120,7 @@
           </div>
           <div class="info-group" >
             <label for="prNumber">PR No.</label>
-            <input type="text" id="prNumber"  placeholder="" />
+            <input type="text" id="prNumber" placeholder="" disabled />
           </div>
           <div class="info-group">
             <label for="prDate">Date</label>
@@ -132,7 +132,7 @@
           <div class="info-group">
             <label for="section">Section</label>
             <select id="section" disabled>
-              <option value="">Select section</option>
+              <option value=""></option>
             </select>
           </div>
           <div class="info-group">
@@ -141,7 +141,7 @@
           </div>
           <div class="info-group">
             <label for="saiNumber">SAI No.</label>
-            <input type="text" id="saiNumber" placeholder="" />
+            <input type="text" id="saiNumber" placeholder="" disabled />
           </div>
         </div>
 
@@ -411,15 +411,17 @@
               <th>Date</th>
               <th>Department</th>
               <th>Branch</th>
+              <th>Control No.</th>
               <th>Item</th>
               <th>Size</th>
               <th>Amount (₱)</th>
+              <th>Status</th>
               <th>Actions</th>
             </tr>
           </thead>
           <tbody id="recordsTableBody">
             <tr>
-              <td colspan="7" class="empty-state">
+              <td colspan="9" class="empty-state">
                 <div class="empty-state-icon"></div>
                 <p>No records available</p>
               </td>

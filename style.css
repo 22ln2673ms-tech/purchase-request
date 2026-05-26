@@ -298,9 +298,9 @@ select {
   display: flex;
   justify-content: center;
   align-items: center;
-  background: radial-gradient(circle at top left, rgba(15, 120, 70, 0.22), transparent 18%),
-              radial-gradient(circle at bottom right, rgba(54, 97, 197, 0.16), transparent 22%),
-              linear-gradient(135deg, rgba(5, 51, 34, 0.92), rgba(18, 35, 43, 0.92));
+  background: radial-gradient(circle at top left, rgba(6, 139, 11, 0.28), transparent 18%),
+              radial-gradient(circle at bottom right, rgba(6, 139, 11, 0.22), transparent 22%),
+              linear-gradient(135deg, rgba(6, 139, 11, 0.92), rgba(6, 139, 11, 0.92));
   z-index: 2000;
 }
 
@@ -2351,6 +2351,22 @@ textarea:focus {
   display: flex;
   flex-direction: column;
   font-size: 9.5pt;
+}
+
+/* Position Control No. in the top-right corner of the meta box */
+.document-container {
+  position: relative;
+}
+
+/* Position Control No. outside the meta box in the document top-right */
+.document-container .control-number-row {
+  position: absolute;
+  top: 0.12in;
+  right: 0.25in;
+  font-weight: 400;
+  text-align: right;
+  font-size: 9pt;
+  color: #222;
 }
 
 .header-image img {

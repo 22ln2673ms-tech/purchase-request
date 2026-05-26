@@ -769,8 +769,34 @@ function applyAuthState() {
   hideLoginOverlay();
   applyRBACRules();
   updateHeaderImage();
+  updateSectionDefaultsForLhio();
   updateRecordsTableSchema();
   routeApp(window.location.hash || '#new');
+}
+
+function isLhioUser() {
+  return /^LHIO\s/.test(currentUserProfile?.office || '');
+}
+
+function isSelectedHeaderLhio() {
+  const selectArea = document.getElementById('selectArea');
+  if (!selectArea) return false;
+  const selectedLabel = selectArea.options[selectArea.selectedIndex]?.text || '';
+  return /^LHIO\s/i.test(selectedLabel.trim());
+}
+
+function updateSectionDefaultsForLhio() {
+  if (!departmentSelect || !sectionSelect) return;
+  if (isLhioUser() || isSelectedHeaderLhio()) {
+    departmentSelect.value = 'FOD';
+    departmentSelect.disabled = true;
+    sectionSelect.innerHTML = '<option value=""></option>';
+    sectionSelect.value = '';
+    sectionSelect.disabled = true;
+    return;
+  }
+  departmentSelect.disabled = false;
+  updateSectionOptions();
 }
 
 function setUserLockedOffice() {
@@ -844,6 +870,7 @@ function cleanPrNumber(pr) {
 
 const sectionSelect = document.getElementById('section');
 const prNumberInput = document.getElementById('prNumber');
+const saiNumberInput = document.getElementById('saiNumber');
 const prDateInput = document.getElementById('prDate');
 const pricePerSqFtInput = document.getElementById('pricePerSqFt');
 const grandTotalOutput = document.getElementById('grandTotal');
@@ -935,6 +962,56 @@ function generateRecordId() {
   return `rec-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
 }
 
+function getSectionInitials(section) {
+  if (!section) return '';
+  const words = String(section).trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return '';
+  const normalizedLastWord = words[words.length - 1].toLowerCase();
+  if (words.length === 2 && normalizedLastWord === 'unit') {
+    return `${words[0][0].toUpperCase()}${words[1][0].toUpperCase()}`;
+  }
+
+  return words[0][0].toUpperCase();
+}
+
+function getRecordControlPrefix(officeLabel, departmentCode, section) {
+  const normalizedOffice = String(officeLabel || '').trim().toUpperCase().replace(/\s+/g, ' ');
+  const deptInitial = String(departmentCode || '').trim()[0]?.toUpperCase() || '';
+  const sectionInitials = getSectionInitials(section);
+  const lhioOfficeCodes = {
+    'LHIO ILOCOS NORTE': 'IN',
+    'LHIO ILOCOS SUR': 'IS',
+    'LHIO LA UNION': 'LU',
+    'LHIO EASTERN PANGASINAN': 'EP',
+    'LHIO WESTERN PANGASINAN': 'WP',
+    'LHIO CENTRAL PANGASINAN': 'CP'
+  };
+  if (/^LHIO\s+/i.test(normalizedOffice)) {
+    const locationCode = lhioOfficeCodes[normalizedOffice] || normalizedOffice.split(/\s+/).slice(1).map(word => word[0]?.toUpperCase()).join('').substring(0, 2);
+    return `L${locationCode}${deptInitial}${sectionInitials}`;
+  }
+
+  if (/PHILHEALTH REGIONAL OFFICE/i.test(normalizedOffice) || /^PRO\s*1/i.test(normalizedOffice) || normalizedOffice === 'PRO1' || normalizedOffice === 'PRO') {
+    return `PRO${deptInitial}${sectionInitials}`;
+  }
+
+  return `CTR${deptInitial}${sectionInitials}`;
+}
+
+function getAllRecordsForControlCount() {
+  return [...getDatabaseRecords(), ...getArchiveRecords()];
+}
+
+function generateControlNumber(formData) {
+  const areaLabel = formData.selectedAreaLabel || formData.selectedArea || currentUserProfile?.office || 'PhilHealth Regional Office';
+  const prefix = getRecordControlPrefix(areaLabel, formData.departmentCode, formData.section);
+  const allRecords = getAllRecordsForControlCount();
+  const existingCount = allRecords.reduce((count, record) => {
+    return count + (String(record.controlNumber || '').startsWith(prefix) ? 1 : 0);
+  }, 0);
+  return `${prefix}${String(existingCount + 1).padStart(2, '0')}`;
+}
+
 function formatRecordSize(record) {
   if (record.size) {
     const sizeText = String(record.size).trim();
@@ -999,6 +1076,23 @@ function convertAreaToDimensions(areaSqFt, unit) {
   };
 }
 
+function getCmPerUnit(unit) {
+  switch (unit) {
+    case 'ft': return 30.48;
+    case 'in': return 2.54;
+    case 'cm': return 1;
+    case 'm': return 100;
+    default: return 1;
+  }
+}
+
+function convertLinear(value, fromUnit, toUnit) {
+  const v = Number(value) || 0;
+  const fromCm = getCmPerUnit(fromUnit);
+  const toCm = getCmPerUnit(toUnit);
+  return (v * fromCm) / toCm;
+}
+
 function updateSectionOptions() {
   const dept = departmentSelect.value;
   sectionSelect.innerHTML = '';
@@ -1030,15 +1124,13 @@ function updateItemCosts(row) {
     const previousUnit = row.dataset.previousUnit;
     const newUnit = unitSelect.value;
 
-    // Calculate current area in square feet
-    const currentAreaSqFt = convertToSquareFeet(currentWidth, currentHeight, previousUnit);
+    // Convert linear dimensions from previous unit to new unit, preserving aspect ratio
+    const newWidth = convertLinear(currentWidth, previousUnit, newUnit);
+    const newHeight = convertLinear(currentHeight, previousUnit, newUnit);
 
-    // Convert back to new unit dimensions while maintaining the same area
-    const newDimensions = convertAreaToDimensions(currentAreaSqFt, newUnit);
-
-    // Update the width and height inputs to the converted values
-    widthInput.value = Math.max(1, Math.min(99, Math.round(newDimensions.width)));
-    heightInput.value = Math.max(1, Math.min(99, Math.round(newDimensions.height)));
+    // Update the width and height inputs to the converted values (rounded)
+    widthInput.value = Math.max(1, Math.round(newWidth));
+    heightInput.value = Math.max(1, Math.round(newHeight));
   }
 
   // Store current unit for next change detection
@@ -1369,6 +1461,11 @@ document.addEventListener('DOMContentLoaded', () => {
     reportYearFilter.addEventListener('change', generateReportTable);
   }
 
+  const selectArea = document.getElementById('selectArea');
+  if (selectArea) {
+    selectArea.addEventListener('change', updateSectionDefaultsForLhio);
+  }
+
   const reportMonthFilter = document.getElementById('reportMonthFilter');
   if (reportMonthFilter) {
     reportMonthFilter.addEventListener('change', generateReportTable);
@@ -1609,6 +1706,8 @@ function validateAndBuildFormData() {
     selectedAreaLabel: document.getElementById('selectArea').options[document.getElementById('selectArea').selectedIndex].text,
     footerVisible: sessionStorage.getItem('footerVisible') === 'true',
     timestamp: new Date().toISOString(),
+    approvalStatus: document.body.dataset.approvalStatus || 'pending',
+    controlNumber: document.body.dataset.controlNumber || '',
     isNew: !isEditMode,
     __meta: { isEditMode, editPrNumber, editRecordId }
   };
@@ -1617,6 +1716,7 @@ function validateAndBuildFormData() {
 }
 
 function persistFormData(formData) {
+  const controlNumber = formData.controlNumber || generateControlNumber(formData);
   const isEditMode = formData.__meta?.isEditMode;
   const editPrNumber = formData.__meta?.editPrNumber;
   const editRecordId = formData.__meta?.editRecordId;
@@ -1631,6 +1731,7 @@ function persistFormData(formData) {
 
     const updatedRecord = {
       ...formData,
+      controlNumber,
       nature: formData.items && formData.items[0]?.itemDescription || '',
       size: formData.size || '',
       quantity: formData.quantity || '',
@@ -1730,6 +1831,8 @@ function saveRecordToDatabase(formData) {
   const parsedDate = parseDateString(formData.prDate);
   const record = {
     ...formData,
+    controlNumber: formData.controlNumber || generateControlNumber(formData),
+    approvalStatus: formData.approvalStatus || 'pending',
     nature: summary.nature,
     size: summary.size,
     quantity: summary.quantity,
@@ -1883,7 +1986,7 @@ function renderRecordsTable(records) {
   if (records.length === 0) {
     tbody.innerHTML = `
       <tr>
-        <td colspan="7" class="empty-state">
+        <td colspan="9" class="empty-state">
           <div class="empty-state-icon"></div>
           <p>No records to show</p>
         </td>
@@ -1901,20 +2004,25 @@ function renderRecordsTable(records) {
     const sizeLabel = formatRecordSize(record);
     const itemTitle = (record.items && record.items[0]?.itemDescription) || record.purpose || '-';
     const dateText = formatDateToLong(record.prDate) || record.prDate || '-';
-    const actions = `
-      <button class="record-action-btn" onclick="openRecord('${recordId}', 'view')">View</button>
-      <button class="record-action-btn" onclick="openRecord('${recordId}', 'edit')">Edit</button>
-      <button class="record-action-btn delete" onclick="deleteRecord('${recordId}')">Archive</button>
-    `;
+    const controlNumber = record.controlNumber || 'TBD';
+    const status = String(record.approvalStatus || 'pending').toLowerCase();
+    const statusLabel = status === 'approved' ? 'Approved' : status === 'rejected' ? 'Rejected' : 'Pending';
+    const statusColor = status === 'approved' ? '#0b7c47' : status === 'rejected' ? '#d63031' : '#f39c12';
+    let actions = `<button class="record-action-btn" onclick="openRecord('${recordId}', 'view')">View</button>`;
+    if (isAdminUser() && status === 'pending') {
+      actions += ` <button class="record-action-btn" onclick="approveRecord('${recordId}')">Approve</button> <button class="record-action-btn delete" onclick="rejectRecord('${recordId}')">Reject</button>`;
+    }
 
     return `
       <tr>
         <td class="date-cell">${dateText}</td>
         <td>${departmentLabel}</td>
         <td>${branch}</td>
+        <td>${controlNumber}</td>
         <td>${itemTitle}</td>
         <td style="text-align:center">${sizeLabel}</td>
         <td>₱${amount.toLocaleString('en-PH', { minimumFractionDigits: 2 })}</td>
+        <td><span style="color: ${statusColor}; font-weight: 700;">${statusLabel}</span></td>
         <td class="action-cell">${actions}</td>
       </tr>
     `;
@@ -1925,14 +2033,16 @@ function updateRecordsTableSchema() {
   const table = document.getElementById('recordsTable');
   if (!table) return;
   const headerCells = table.querySelectorAll('thead th');
-  if (headerCells.length >= 6) {
+  if (headerCells.length >= 9) {
     headerCells[0].textContent = 'Date';
     headerCells[1].textContent = 'Department';
     headerCells[2].textContent = 'Branch';
-    headerCells[3].textContent = 'Item';
-    headerCells[4].textContent = 'Size';
-    headerCells[5].textContent = 'Amount (₱)';
-    if (headerCells[6]) headerCells[6].textContent = 'Actions';
+    headerCells[3].textContent = 'Control No.';
+    headerCells[4].textContent = 'Item';
+    headerCells[5].textContent = 'Size';
+    headerCells[6].textContent = 'Amount (₱)';
+    headerCells[7].textContent = 'Status';
+    if (headerCells[8]) headerCells[8].textContent = 'Actions';
   }
 }
 
@@ -1952,19 +2062,6 @@ function filterRecords() {
     });
   }
 
-  if (searchValue) {
-    records = records.filter(record => {
-      const branchText = getRecordBranch(record).toLowerCase();
-      const itemText = (record.items && record.items[0]?.itemDescription || '').toLowerCase();
-      return (
-        (record.prNumber || '').toLowerCase().includes(searchValue) ||
-        branchText.includes(searchValue) ||
-        itemText.includes(searchValue) ||
-        (record.purpose || '').toLowerCase().includes(searchValue)
-      );
-    });
-  }
-
   if (branchValue) {
     records = records.filter(record => getRecordBranch(record).toLowerCase().includes(branchValue));
   }
@@ -1977,6 +2074,22 @@ function filterRecords() {
       } catch (e) {
         return false;
       }
+    });
+  }
+
+  if (searchValue) {
+    records = records.filter(record => {
+      const branchText = getRecordBranch(record).toLowerCase();
+      const itemText = ((record.items && record.items[0]?.itemDescription) || '').toLowerCase();
+      const controlNumberText = String(record.controlNumber || '').toLowerCase();
+      const statusText = String(record.approvalStatus || 'pending').toLowerCase();
+      return (
+        (record.prNumber || '').toLowerCase().includes(searchValue) ||
+        branchText.includes(searchValue) ||
+        itemText.includes(searchValue) ||
+        controlNumberText.includes(searchValue) ||
+        statusText.includes(searchValue)
+      );
     });
   }
 
@@ -2100,6 +2213,7 @@ function permanentlyDeleteArchived(recordId) {
 
 function updateSummaryCards(records = []) {
   const totalValue = records.reduce((sum, record) => {
+    if (String(record.approvalStatus || '').toLowerCase() !== 'approved') return sum;
     const amountString = record.grandTotal || record.cost || '₱0.00';
     const grandTotal = parseFloat(amountString.replace(/[₱,]/g, '') || '0') || 0;
     return sum + grandTotal;
@@ -2269,6 +2383,32 @@ function deleteRecord(recordId) {
   setDatabaseRecords(records);
   applyDashboardFilters();
   alert('Record archived successfully! It can be restored within 30 days from the Archive menu.');
+}
+
+function approveRecord(recordId) {
+  const records = getDatabaseRecords();
+  const index = records.findIndex(r => r.id === recordId || cleanPrNumber(r.prNumber) === recordId);
+  if (index === -1) return;
+  records[index].approvalStatus = 'approved';
+  records[index].approvalBy = currentUserProfile?.displayName || 'Admin';
+  records[index].approvalAt = new Date().toISOString();
+  setDatabaseRecords(records);
+  initRecords();
+  applyDashboardFilters();
+  alert('Record approved successfully. Total purchase value is updated for approved requests.');
+}
+
+function rejectRecord(recordId) {
+  const records = getDatabaseRecords();
+  const index = records.findIndex(r => r.id === recordId || cleanPrNumber(r.prNumber) === recordId);
+  if (index === -1) return;
+  records[index].approvalStatus = 'rejected';
+  records[index].approvalBy = currentUserProfile?.displayName || 'Admin';
+  records[index].approvalAt = new Date().toISOString();
+  setDatabaseRecords(records);
+  initRecords();
+  applyDashboardFilters();
+  alert('Record rejected successfully. It will no longer be counted as approved.');
 }
 
 function updateDashboardYearFilter(records) {
@@ -2686,12 +2826,14 @@ const TABLE1_HTML = `<!DOCTYPE html>
   <div class="header-image">
     <img src="assets/header.png" alt="PhilHealth Header">
   </div>
+  <div class="control-number-row">
+    <span id="controlNumberDisplay"></span>
+  </div>
   <div class="meta-container">
     <div class="meta-content-area">
       <h1>PURCHASE REQUEST</h1>
       <div class="office-name">PhilHealth Regional Office 1</div>
       <div class="agency-tag">AGENCY</div>
-      
       <div class="meta-row-layout">
         <div class="meta-left">
           Department: <span class="underline-input"><input type="text"></span><br>
@@ -2914,6 +3056,7 @@ function populateViewWindow(viewWindow, record) {
   const unitCostEl = doc.getElementById('unitCostDisplay');
   const totalCostEl = doc.getElementById('totalCostDisplay');
   const grandTotalEl = doc.getElementById('grandTotalDisplay');
+  const controlNumberEl = doc.getElementById('controlNumberDisplay');
   const onDateEl = doc.getElementById('onDateDisplay');
   
   if (itemDescEl) itemDescEl.innerHTML = itemDescDisplay;
@@ -2921,6 +3064,7 @@ function populateViewWindow(viewWindow, record) {
   if (unitCostEl) unitCostEl.innerHTML = unitCostDisplay;
   if (totalCostEl) totalCostEl.innerHTML = totalCostDisplay;
   if (grandTotalEl) grandTotalEl.textContent = formatCurrency(totalAmount);
+  if (controlNumberEl) controlNumberEl.textContent = record.controlNumber || '';
   if (onDateEl) onDateEl.textContent = record.prDate || '';
   
   if (record.footerVisible) {
@@ -3443,6 +3587,8 @@ function resetEditMode() {
   // Reset edit mode flags
   delete document.body.dataset.editMode;
   delete document.body.dataset.editPrNumber;
+  delete document.body.dataset.controlNumber;
+  delete document.body.dataset.approvalStatus;
 
   // Reset save button
   const saveBtn = document.getElementById('saveBtn');
@@ -3496,6 +3642,8 @@ function loadRecordIntoForm(record) {
   document.getElementById('approvedByName').value = record.approvedByName || '';
   document.getElementById('approvedByDesignation').value = record.approvedByDesignation || '';
   document.getElementById('selectArea').value = record.selectedArea || record.area || '';
+  document.body.dataset.controlNumber = record.controlNumber || '';
+  document.body.dataset.approvalStatus = record.approvalStatus || 'pending';
 
   // Ensure the saved LHIO selection is visible to the user when editing.
   // If the saved value isn't present in the select options (older records or custom values),
