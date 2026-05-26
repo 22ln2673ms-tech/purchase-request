@@ -353,7 +353,8 @@ select {
   position: relative;
   width: min(460px, calc(100% - 40px));
   max-width: 520px;
-  background: rgba(255, 255, 255, 0.98);
+  background: linear-gradient(180deg, rgba(255,255,255,0.98) 0%, rgba(247,250,248,0.98) 100%),
+              repeating-linear-gradient(135deg, rgba(11,124,71,0.02) 0px 6px, transparent 6px 18px);
   border-radius: 28px;
   padding: 36px 36px 32px;
   box-shadow: 0 30px 80px rgba(0, 0, 0, 0.18);
@@ -367,6 +368,32 @@ select {
   position: absolute;
   inset: 0;
   background: linear-gradient(135deg, rgba(255,255,255,0.18), rgba(255,255,255,0));
+  pointer-events: none;
+}
+
+/* subtle decorative shapes for the sign background */
+.auth-panel::after {
+  content: '';
+  position: absolute;
+  right: -40px;
+  top: -40px;
+  width: 160px;
+  height: 160px;
+  background: radial-gradient(circle at 30% 30%, rgba(11,124,71,0.08), transparent 30%),
+              radial-gradient(circle at 70% 70%, rgba(92,107,192,0.04), transparent 30%);
+  transform: rotate(12deg);
+  pointer-events: none;
+}
+
+/* gentle bottom-left accent */
+.auth-panel .auth-accent-blur {
+  position: absolute;
+  left: -30px;
+  bottom: -20px;
+  width: 220px;
+  height: 120px;
+  background: radial-gradient(ellipse at center, rgba(11,124,71,0.06), transparent 50%);
+  filter: blur(18px);
   pointer-events: none;
 }
 
