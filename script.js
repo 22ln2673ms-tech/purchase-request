@@ -2012,6 +2012,9 @@ function renderRecordsTable(records) {
     if (isAdminUser() && status === 'pending') {
       actions += ` <button class="record-action-btn" onclick="approveRecord('${recordId}')">Approve</button> <button class="record-action-btn delete" onclick="rejectRecord('${recordId}')">Reject</button>`;
     }
+    if (isAdminUser() && status === 'rejected') {
+      actions += ` <button class="record-action-btn delete" onclick="deleteRecord('${recordId}')">Archive</button>`;
+    }
 
     return `
       <tr>
@@ -2120,18 +2123,24 @@ function renderArchiveTable(records) {
 
   tbody.innerHTML = records.map(record => {
     const recordId = record.id || cleanPrNumber(record.prNumber);
+    const controlNumber = record.controlNumber || record.prNumber || 'TBD';
     const amountString = record.grandTotal || record.cost || '₱0.00';
     const amount = parseFloat(amountString.replace(/[₱,]/g, '') || '0') || 0;
     const branch = getRecordBranch(record) || '-';
     const archivedAt = record.archivedAt ? new Date(record.archivedAt).toLocaleDateString('en-PH') : '-';
     const itemSize = formatRecordSize(record);
+    const status = String(record.approvalStatus || 'pending').toLowerCase();
+    const statusLabel = status === 'approved' ? 'Approved' : status === 'rejected' ? 'Rejected' : 'Pending';
+    const statusColor = status === 'approved' ? '#0b7c47' : status === 'rejected' ? '#d63031' : '#f39c12';
     return `
       <tr>
         <td class="date-cell">${archivedAt}</td>
+        <td>${controlNumber}</td>
         <td>${branch}</td>
         <td>${(record.items && record.items[0]?.itemDescription) || record.purpose || '-'}</td>
         <td>${itemSize || '-'}</td>
         <td>₱${amount.toLocaleString('en-PH', { minimumFractionDigits: 2 })}</td>
+        <td><span style="color: ${statusColor}; font-weight:700">${statusLabel}</span></td>
         <td class="action-cell">
           <button class="record-action-btn" onclick="restoreArchivedRecord('${recordId}')">Restore</button>
           <button class="record-action-btn delete" onclick="permanentlyDeleteArchived('${recordId}')">Delete</button>
@@ -2373,6 +2382,7 @@ function deleteRecord(recordId) {
 }
 
 function approveRecord(recordId) {
+  if (!confirm('Are you sure you want to approve this record?')) return;
   const records = getDatabaseRecords();
   const index = records.findIndex(r => r.id === recordId || cleanPrNumber(r.prNumber) === recordId);
   if (index === -1) return;
@@ -2386,6 +2396,7 @@ function approveRecord(recordId) {
 }
 
 function rejectRecord(recordId) {
+  if (!confirm('Are you sure you want to reject this record?')) return;
   const records = getDatabaseRecords();
   const index = records.findIndex(r => r.id === recordId || cleanPrNumber(r.prNumber) === recordId);
   if (index === -1) return;
@@ -2508,7 +2519,8 @@ function closeReportModal() {
 }
 
 function populateReportYearFilter() {
-  const records = getDatabaseRecords();
+  let records = getDatabaseRecords();
+  records = records.filter(record => String(record.approvalStatus || '').toLowerCase() === 'approved');
   const yearFilter = document.getElementById('reportYearFilter');
   if (!yearFilter) return;
   const years = new Set();
@@ -2528,6 +2540,7 @@ function generateReportTable() {
   const yearValue = document.getElementById('reportYearFilter')?.value;
   const monthValue = document.getElementById('reportMonthFilter')?.value;
   let records = getDatabaseRecords();
+  records = records.filter(record => String(record.approvalStatus || '').toLowerCase() === 'approved');
 
   if (yearValue) {
     records = records.filter(record => {
