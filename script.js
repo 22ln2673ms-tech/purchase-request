@@ -2012,9 +2012,6 @@ function renderRecordsTable(records) {
     if (isAdminUser() && status === 'pending') {
       actions += ` <button class="record-action-btn" onclick="approveRecord('${recordId}')">Approve</button> <button class="record-action-btn delete" onclick="rejectRecord('${recordId}')">Reject</button>`;
     }
-    if (isAdminUser() && status === 'approved') {
-      actions += ` <button class="record-action-btn delete" onclick="deleteRecord('${recordId}')">Archive</button>`;
-    }
     if (isAdminUser() && status === 'rejected') {
       actions += ` <button class="record-action-btn delete" onclick="deleteRecord('${recordId}')">Archive</button>`;
     }
