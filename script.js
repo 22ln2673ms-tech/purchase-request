@@ -2015,10 +2015,10 @@ function renderRecordsTable(records) {
 
     return `
       <tr>
+        <td>${controlNumber}</td>
         <td class="date-cell">${dateText}</td>
         <td>${departmentLabel}</td>
         <td>${branch}</td>
-        <td>${controlNumber}</td>
         <td>${itemTitle}</td>
         <td style="text-align:center">${sizeLabel}</td>
         <td>₱${amount.toLocaleString('en-PH', { minimumFractionDigits: 2 })}</td>
@@ -2034,10 +2034,10 @@ function updateRecordsTableSchema() {
   if (!table) return;
   const headerCells = table.querySelectorAll('thead th');
   if (headerCells.length >= 9) {
-    headerCells[0].textContent = 'Date';
-    headerCells[1].textContent = 'Department';
-    headerCells[2].textContent = 'Branch';
-    headerCells[3].textContent = 'Control No.';
+    headerCells[0].textContent = 'Control No.';
+    headerCells[1].textContent = 'Date';
+    headerCells[2].textContent = 'Department';
+    headerCells[3].textContent = 'Branch';
     headerCells[4].textContent = 'Item';
     headerCells[5].textContent = 'Size';
     headerCells[6].textContent = 'Amount (₱)';
@@ -2079,17 +2079,8 @@ function filterRecords() {
 
   if (searchValue) {
     records = records.filter(record => {
-      const branchText = getRecordBranch(record).toLowerCase();
-      const itemText = ((record.items && record.items[0]?.itemDescription) || '').toLowerCase();
       const controlNumberText = String(record.controlNumber || '').toLowerCase();
-      const statusText = String(record.approvalStatus || 'pending').toLowerCase();
-      return (
-        (record.prNumber || '').toLowerCase().includes(searchValue) ||
-        branchText.includes(searchValue) ||
-        itemText.includes(searchValue) ||
-        controlNumberText.includes(searchValue) ||
-        statusText.includes(searchValue)
-      );
+      return controlNumberText.includes(searchValue);
     });
   }
 
@@ -2350,11 +2341,7 @@ function renderSavedRecordsTable(records) {
     const itemSize = formatRecordSize(record);
     const quantity = record.quantity || item.quantity || '-';
     const recordId = record.id || cleanPrNumber(record.prNumber);
-    const actions = isAdminUser() ? `
-      <button class="record-action-btn" onclick="openRecord('${recordId}', 'view')">View</button>
-      <button class="record-action-btn" onclick="openRecord('${recordId}', 'edit')">Edit</button>
-      <button class="record-action-btn delete" onclick="deleteRecord('${recordId}')">Delete</button>
-    ` : '';
+    const actions = `<button class="record-action-btn" onclick="openRecord('${recordId}', 'view')">View</button>`;
 
     return `
       <tr class="${isLatest ? 'latest-record' : ''}">
@@ -2433,6 +2420,9 @@ function applyDashboardFilters() {
   const branchValue = document.getElementById('branchFilter')?.value.toLowerCase() || '';
 
   let records = getDatabaseRecords();
+
+  // Only show approved records in "Saved PR Records" on the dashboard
+  records = records.filter(record => String(record.approvalStatus || '').toLowerCase() === 'approved');
 
   if (branchValue) {
     records = records.filter(record => getRecordBranch(record).toLowerCase().includes(branchValue));
