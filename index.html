@@ -52,6 +52,37 @@
     </div>
   </div>
 
+  <div id="passwordResetConfirmModal" class="confirm-modal hidden" aria-hidden="true">
+    <div class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="resetConfirmTitle">
+      <h2 id="resetConfirmTitle">Confirm Password Reset</h2>
+      <p id="resetConfirmEmail">Are you sure you want to reset the password for this account? A reset email will be sent to the registered email address.</p>
+      <div class="confirm-actions">
+        <button id="cancelPasswordResetBtn" class="button button--ghost">Cancel</button>
+        <button id="confirmPasswordResetBtn" class="button button--danger">Yes, Reset Password</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="passwordResetSuccessModal" class="confirm-modal hidden" aria-hidden="true">
+    <div class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="resetSuccessTitle">
+      <h2 id="resetSuccessTitle">Password Reset Successful</h2>
+      <p>Password reset email has been sent successfully. The user can use the reset link to set a new password.</p>
+      <div class="confirm-actions">
+        <button id="closePasswordResetSuccessBtn" class="button button--primary">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="accountCreatedModal" class="confirm-modal hidden" aria-hidden="true">
+    <div class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="accountCreatedTitle">
+      <h2 id="accountCreatedTitle">Account Created Successfully</h2>
+      <p id="accountCreatedEmail">The new officer account has been created. An email with login instructions will be sent to the registered email address.</p>
+      <div class="confirm-actions">
+        <button id="closeAccountCreatedBtn" class="button button--primary">Close</button>
+      </div>
+    </div>
+  </div>
+
   <nav class="sidebar">
     <div class="sidebar-auth">
       <div class="sidebar-auth-info">
@@ -173,11 +204,11 @@
                     </div>
                     <div>
                       <label>Width</label>
-                      <input type="number" class="width-input" value="2" min="1" max="99" step="1" />
+                      <input type="number" class="width-input" value="2" min="1" max="1000" step="any" />
                     </div>
                     <div>
                       <label>Height</label>
-                      <input type="number" class="height-input" value="2" min="1" max="99" step="1" />
+                      <input type="number" class="height-input" value="2" min="1" max="1000" step="any" />
                     </div>
                     <div>
                       <label>Unit of Measure</label>

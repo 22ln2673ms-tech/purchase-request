@@ -75,6 +75,7 @@ let firestoreDb = null;
 let userAccountsCache = [];
 let userAccountsPage = 1;
 let userAccountsSearch = '';
+let pendingPasswordResetEmail = '';
 const USER_ACCOUNTS_PER_PAGE = 15;
 
 function initializeFirebaseAuth() {
@@ -449,6 +450,56 @@ function closeSignOutConfirm() {
   modal.setAttribute('aria-hidden', 'true');
 }
 
+function openPasswordResetConfirm(email) {
+  const modal = document.getElementById('passwordResetConfirmModal');
+  if (!modal) return;
+  document.getElementById('resetConfirmEmail').textContent = `Are you sure you want to reset the password for ${email}? A reset email will be sent to this address.`;
+  modal.classList.remove('hidden');
+  modal.classList.add('active');
+  modal.setAttribute('aria-hidden', 'false');
+}
+
+function closePasswordResetConfirm() {
+  const modal = document.getElementById('passwordResetConfirmModal');
+  if (!modal) return;
+  modal.classList.add('hidden');
+  modal.classList.remove('active');
+  modal.setAttribute('aria-hidden', 'true');
+}
+
+function openPasswordResetSuccess() {
+  const modal = document.getElementById('passwordResetSuccessModal');
+  if (!modal) return;
+  modal.classList.remove('hidden');
+  modal.classList.add('active');
+  modal.setAttribute('aria-hidden', 'false');
+}
+
+function closePasswordResetSuccess() {
+  const modal = document.getElementById('passwordResetSuccessModal');
+  if (!modal) return;
+  modal.classList.add('hidden');
+  modal.classList.remove('active');
+  modal.setAttribute('aria-hidden', 'true');
+}
+
+function openAccountCreatedSuccess(email) {
+  const modal = document.getElementById('accountCreatedModal');
+  if (!modal) return;
+  document.getElementById('accountCreatedEmail').textContent = `A new officer account has been created for ${email}. Login instructions have been sent to this email address.`;
+  modal.classList.remove('hidden');
+  modal.classList.add('active');
+  modal.setAttribute('aria-hidden', 'false');
+}
+
+function closeAccountCreatedSuccess() {
+  const modal = document.getElementById('accountCreatedModal');
+  if (!modal) return;
+  modal.classList.add('hidden');
+  modal.classList.remove('active');
+  modal.setAttribute('aria-hidden', 'true');
+}
+
 function applyRBACRules() {
   const isAdmin = isAdminUser();
   const officeSelect = document.getElementById('selectArea');
@@ -592,7 +643,7 @@ function renderUserAccountsPage() {
           <td><span class="role-badge ${roleLabel}">${roleLabel}</span></td>
           <td>${user.office || '-'}</td>
           <td class="action-cell user-actions">
-            <button class="button button--secondary" type="button" onclick="resetOfficerPassword('${user.email}')">Reset Password</button>
+            <button class="button button--secondary" type="button" onclick="initiatePasswordReset('${user.email}')">Reset Password</button>
             <button class="button button--danger" type="button" onclick="deleteOfficerAccount('${user.uid || ''}')">Delete</button>
           </td>
         </tr>
@@ -673,11 +724,38 @@ async function createOfficerAccount() {
     document.getElementById('newUserRole').value = 'user';
     document.getElementById('newUserOffice').value = 'PhilHealth Regional Office 1 (PRO 1)';
 
-    showUserManagementMessage(`Officer account created for ${email}.`, 'success');
+    clearUserManagementMessage();
+    openAccountCreatedSuccess(email);
     loadOfficerAccounts();
   } catch (error) {
     console.error('Create officer account error:', error);
     showUserManagementMessage(`Failed to create officer account: ${error.message}`, 'error');
+  }
+}
+
+function initiatePasswordReset(email) {
+  if (!email) return;
+  openPasswordResetConfirm(email);
+  pendingPasswordResetEmail = email;
+}
+
+async function confirmPasswordReset() {
+  if (!pendingPasswordResetEmail) return;
+  clearUserManagementMessage();
+  try {
+    const auth = getAuthInstance();
+    if (!auth) {
+      throw new Error('Firebase Auth is not available.');
+    }
+    await auth.sendPasswordResetEmail(pendingPasswordResetEmail);
+    closePasswordResetConfirm();
+    openPasswordResetSuccess();
+    pendingPasswordResetEmail = '';
+  } catch (error) {
+    console.error('Password reset error:', error);
+    closePasswordResetConfirm();
+    showUserManagementMessage(`Unable to send reset email: ${error.message}`, 'error');
+    pendingPasswordResetEmail = '';
   }
 }
 
@@ -1030,67 +1108,51 @@ function formatRecordSize(record) {
   return '-';
 }
 
-function convertToSquareFeet(width, height, unit) {
-  const w = Number(width);
-  const h = Number(height);
+function getInchesPerUnit(unit) {
   switch (unit) {
-    case 'ft':
-      return w * h;
-    case 'in':
-      return (w / 12) * (h / 12);
-    case 'cm':
-      return (w / 30.48) * (h / 30.48);
-    case 'm':
-      return (w * 3.28084) * (h * 3.28084);
-    default:
-      return w * h;
-  }
-}
-
-function convertAreaToDimensions(areaSqFt, unit) {
-  // Convert square feet area back to dimensions in the specified unit
-  let dimensionSqFt;
-  switch (unit) {
-    case 'ft':
-      dimensionSqFt = 1; // 1 sq ft = 1 ft x 1 ft
-      break;
-    case 'in':
-      dimensionSqFt = 1/144; // 1 sq in = 1/144 sq ft, so 1 sq ft = 144 sq in
-      break;
-    case 'cm':
-      dimensionSqFt = 1/929.03; // 1 sq cm ≈ 1/929.03 sq ft
-      break;
-    case 'm':
-      dimensionSqFt = 10.7639; // 1 sq m = 10.7639 sq ft
-      break;
-    default:
-      dimensionSqFt = 1;
-  }
-
-  // Calculate dimension value that gives the target area
-  const dimensionValue = Math.sqrt(areaSqFt / dimensionSqFt);
-
-  return {
-    width: dimensionValue,
-    height: dimensionValue
-  };
-}
-
-function getCmPerUnit(unit) {
-  switch (unit) {
-    case 'ft': return 30.48;
-    case 'in': return 2.54;
-    case 'cm': return 1;
-    case 'm': return 100;
+    case 'ft': return 12;
+    case 'in': return 1;
+    case 'cm': return 1 / 2.54;
+    case 'm': return 1 / 0.0254;
     default: return 1;
   }
 }
 
+function toInches(value, unit) {
+  const v = parseFloat(value) || 0;
+  return v * getInchesPerUnit(unit);
+}
+
+function fromInches(value, unit) {
+  switch (unit) {
+    case 'ft': return value / 12;
+    case 'in': return value;
+    case 'cm': return value * 2.54;
+    case 'm': return value * 0.0254;
+    default: return value;
+  }
+}
+
+function convertToSquareFeet(width, height, unit) {
+  const w = parseFloat(width) || 0;
+  const h = parseFloat(height) || 0;
+  const widthInches = toInches(w, unit);
+  const heightInches = toInches(h, unit);
+  return (widthInches * heightInches) / 144;
+}
+
+function convertAreaToDimensions(areaSqFt, unit) {
+  const areaInSquareInches = areaSqFt * 144;
+  const sideInches = Math.sqrt(areaInSquareInches);
+  return {
+    width: fromInches(sideInches, unit),
+    height: fromInches(sideInches, unit)
+  };
+}
+
 function convertLinear(value, fromUnit, toUnit) {
-  const v = Number(value) || 0;
-  const fromCm = getCmPerUnit(fromUnit);
-  const toCm = getCmPerUnit(toUnit);
-  return (v * fromCm) / toCm;
+  const inches = toInches(value, fromUnit);
+  return fromInches(inches, toUnit);
 }
 
 function updateSectionOptions() {
@@ -1119,8 +1181,8 @@ function updateItemCosts(row) {
 
   // Handle unit conversion - adjust width/height to maintain same area
   if (row.dataset.previousUnit && row.dataset.previousUnit !== unitSelect.value) {
-    const currentWidth = parseFloat(widthInput.value);
-    const currentHeight = parseFloat(heightInput.value);
+    const currentWidth = parseFloat(widthInput.value) || 0;
+    const currentHeight = parseFloat(heightInput.value) || 0;
     const previousUnit = row.dataset.previousUnit;
     const newUnit = unitSelect.value;
 
@@ -1128,9 +1190,9 @@ function updateItemCosts(row) {
     const newWidth = convertLinear(currentWidth, previousUnit, newUnit);
     const newHeight = convertLinear(currentHeight, previousUnit, newUnit);
 
-    // Update the width and height inputs to the converted values (rounded)
-    widthInput.value = Math.max(1, Math.round(newWidth));
-    heightInput.value = Math.max(1, Math.round(newHeight));
+    // Update the width and height inputs to the converted values without truncation
+    widthInput.value = Math.max(0, newWidth).toFixed(4);
+    heightInput.value = Math.max(0, newHeight).toFixed(4);
   }
 
   // Store current unit for next change detection
@@ -1198,11 +1260,11 @@ function addNewItem() {
         </div>
         <div>
           <label>Width</label>
-          <input type="number" class="width-input" value="2" min="1" max="99" step="1" />
+          <input type="number" class="width-input" value="2" min="1" max="99" step="any" />
         </div>
         <div>
           <label>Height</label>
-          <input type="number" class="height-input" value="2" min="1" max="99" step="1" />
+          <input type="number" class="height-input" value="2" min="1" max="99" step="any" />
         </div>
         <div>
           <label>Unit of Measure</label>
@@ -1402,6 +1464,17 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('logoutBtn')?.addEventListener('click', openSignOutConfirm);
   document.getElementById('cancelSignOutBtn')?.addEventListener('click', closeSignOutConfirm);
   document.getElementById('confirmSignOutBtn')?.addEventListener('click', signOutFirebase);
+
+  // Password reset modal listeners
+  document.getElementById('cancelPasswordResetBtn')?.addEventListener('click', closePasswordResetConfirm);
+  document.getElementById('confirmPasswordResetBtn')?.addEventListener('click', confirmPasswordReset);
+  document.getElementById('closePasswordResetSuccessBtn')?.addEventListener('click', () => {
+    closePasswordResetSuccess();
+    loadOfficerAccounts();
+  });
+
+  // Account created modal listeners
+  document.getElementById('closeAccountCreatedBtn')?.addEventListener('click', closeAccountCreatedSuccess);
 
   const authEmailInput = document.getElementById('authEmail');
   const authPasswordInput = document.getElementById('authPassword');
@@ -3697,11 +3770,11 @@ function loadRecordIntoForm(record) {
             </div>
             <div>
               <label>Width</label>
-              <input type="number" class="width-input" value="${item.width || 2}" min="1" max="99" step="1" />
+              <input type="number" class="width-input" value="${item.width || 2}" min="1" max="99" step="any" />
             </div>
             <div>
               <label>Height</label>
-              <input type="number" class="height-input" value="${item.height || 2}" min="1" max="99" step="1" />
+              <input type="number" class="height-input" value="${item.height || 2}" min="1" max="99" step="any" />
             </div>
             <div>
               <label>Unit of Measure</label>
