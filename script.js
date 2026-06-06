@@ -692,43 +692,7 @@ async function createOfficerAccount() {
     showUserManagementMessage('Please provide a valid name, email, and password with at least 6 characters.', 'error');
     return;
   }
-  // If a server-side user creation endpoint is configured, prefer that for security
-  const serverEndpoint = window.serverCreateUserEndpoint || '/api/createUser';
-  if (serverEndpoint) {
-    try {
-      const resp = await fetch(serverEndpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: normalizedEmail, password, name, role, office })
-      });
-      const json = await resp.json();
-      if (!resp.ok) throw new Error(json.error || `Server error (${resp.status})`);
-      // Optionally send password reset from client if desired
-      try {
-        const auth = getAuthInstance();
-        if (auth && typeof auth.sendPasswordResetEmail === 'function') {
-          await auth.sendPasswordResetEmail(normalizedEmail);
-        }
-      } catch (pwErr) {
-        console.warn('Failed to send password reset email:', pwErr);
-      }
-      // Successful creation
-      document.getElementById('newUserName').value = '';
-      document.getElementById('newUserEmail').value = '';
-      document.getElementById('newUserPassword').value = '';
-      document.getElementById('newUserRole').value = 'user';
-      document.getElementById('newUserOffice').value = 'PhilHealth Regional Office 1 (PRO 1)';
-      clearUserManagementMessage();
-      openAccountCreatedSuccess(email);
-      loadOfficerAccounts();
-      return;
-    } catch (error) {
-      console.warn('Server-side create user failed, falling back to client signUp:', error);
-      showUserManagementMessage(`Server create failed: ${error.message}. Falling back...`, 'error');
-    }
-  }
 
-  // Fallback: client-side Identity Toolkit signUp (existing behavior)
   const endpoint = `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${firebaseConfig.apiKey}`;
   try {
     const response = await fetch(endpoint, {
@@ -737,22 +701,12 @@ async function createOfficerAccount() {
       body: JSON.stringify({ email: normalizedEmail, password, returnSecureToken: true })
     });
     const data = await response.json();
-    
-    // Check for error payload from Identity Toolkit
     if (data.error) {
-      // Give a clearer message for common issues (API key, disabled sign-up, etc.)
-      const msg = data.error.message || 'Unable to create account';
-      throw new Error(`Auth signUp failed: ${msg}`);
-    }
-
-    // Ensure we actually received a created user id
-    if (!data.localId) {
-      throw new Error('Auth signUp did not return a user id (localId).');
+      throw new Error(data.error.message || 'Unable to create account');
     }
 
     const db = getFirestoreInstance();
     if (db) {
-      // Persist the user in Firestore only after successful Auth creation
       await db.collection('users').doc(data.localId).set({
         uid: data.localId,
         email: normalizedEmail,
@@ -764,16 +718,6 @@ async function createOfficerAccount() {
       }, { merge: true });
     }
 
-    // Send a password reset email so the user can securely set their password
-    try {
-      const auth = getAuthInstance();
-      if (auth && typeof auth.sendPasswordResetEmail === 'function') {
-        await auth.sendPasswordResetEmail(normalizedEmail);
-      }
-    } catch (pwErr) {
-      console.warn('Failed to send password reset email:', pwErr);
-      // Don't fail the whole flow if reset email couldn't be sent
-    }
     document.getElementById('newUserName').value = '';
     document.getElementById('newUserEmail').value = '';
     document.getElementById('newUserPassword').value = '';
@@ -1844,30 +1788,13 @@ function validateAndBuildFormData() {
   return formData;
 }
 
-async function persistFormData(formData) {
+function persistFormData(formData) {
   const controlNumber = formData.controlNumber || generateControlNumber(formData);
   const isEditMode = formData.__meta?.isEditMode;
   const editPrNumber = formData.__meta?.editPrNumber;
   const editRecordId = formData.__meta?.editRecordId;
 
-  const savedRecord = {
-    ...formData,
-    controlNumber,
-    nature: formData.items && formData.items[0]?.itemDescription || '',
-    size: formData.size || '',
-    quantity: formData.quantity || '',
-    cost: formData.grandTotal,
-    timestamp: new Date().toISOString()
-  };
-
-  const db = getFirestoreInstance();
-  const canUseRemote = db && currentAuthUser;
-
   if (isEditMode) {
-    if (canUseRemote && savedRecord.id) {
-      await updatePurchaseRequestInFirestore(savedRecord.id, savedRecord);
-    }
-
     let records = getDatabaseRecords();
     records = records.filter(r => {
       if (editRecordId) return r.id !== editRecordId;
@@ -1875,40 +1802,38 @@ async function persistFormData(formData) {
       return true;
     });
 
-    records.unshift(savedRecord);
+    const updatedRecord = {
+      ...formData,
+      controlNumber,
+      nature: formData.items && formData.items[0]?.itemDescription || '',
+      size: formData.size || '',
+      quantity: formData.quantity || '',
+      cost: formData.grandTotal,
+      timestamp: new Date().toISOString()
+    };
+
+    records.unshift(updatedRecord);
     setDatabaseRecords(records);
     alert('Record updated successfully!');
     // Update UI lists
-    updateSummaryCards(records);
-    renderRecordsTable(records);
+    updateSummaryCards(getDatabaseRecords());
+    renderRecordsTable(getDatabaseRecords());
     // Exit edit mode
     resetEditMode();
     // Preview the updated saved record
-    showPreviewModal(savedRecord);
+    showPreviewModal(updatedRecord);
     resetRequestForm();
     return;
   }
 
-  let records = getDatabaseRecords();
-  if (canUseRemote) {
-    const savedId = await savePurchaseRequestToFirestore(savedRecord);
-    if (savedId) {
-      savedRecord.id = savedId;
-    }
-  }
-
-  const existingIndex = savedRecord.id ? records.findIndex(r => r.id === savedRecord.id) : -1;
-  if (existingIndex >= 0) {
-    records[existingIndex] = savedRecord;
-  } else {
-    records.unshift(savedRecord);
-  }
-  setDatabaseRecords(records);
-
-  updateSummaryCards(records);
-  renderRecordsTable(records);
+  // New record: save and then preview the saved version
+  saveRecordToDatabase(formData);
+  // Ensure UI updated
+  updateSummaryCards(getDatabaseRecords());
+  renderRecordsTable(getDatabaseRecords());
   resetEditMode();
-  const saved = records.find(r => r.id === savedRecord.id) || records[0];
+  // Find saved record by id and preview it
+  const saved = getDatabaseRecords().find(r => r.id === formData.id) || getDatabaseRecords()[0];
   if (saved) {
     alert('Record saved successfully!');
     showPreviewModal(saved);
@@ -1918,32 +1843,19 @@ async function persistFormData(formData) {
   }
 }
 
-async function checkPreview() {
+function checkPreview() {
   const formData = validateAndBuildFormData();
   if (!formData) return;
   // Only preview the current input (do not save)
   showPreviewModal(formData);
 }
 
-async function saveForm() {
+function saveForm() {
   const formData = validateAndBuildFormData();
   if (!formData) return;
   if (!confirm('Please confirm: Are the details you entered correct? Click OK to save and preview.')) return;
   // Persist then preview the saved record
-  await persistFormData(formData);
-}
-
-async function getPersistedRecords() {
-  const db = getFirestoreInstance();
-  if (db && currentAuthUser) {
-    const records = await getPurchaseRequestsForUser();
-    if (Array.isArray(records)) {
-      // Keep a local copy for UI filtering and fallback
-      setDatabaseRecords(records);
-      return records;
-    }
-  }
-  return getDatabaseRecords();
+  persistFormData(formData);
 }
 
 function getDatabaseRecords() {
@@ -2073,15 +1985,15 @@ function setActiveView(view) {
   }
 }
 
-async function initDashboard() {
-  const allRecords = await getPersistedRecords();
+function initDashboard() {
+  const allRecords = getDatabaseRecords();
   updateDashboardYearFilter(allRecords);
   updateSummaryCards(allRecords);
   applyDashboardFilters();
 }
 
-async function initRecords() {
-  const allRecords = await getPersistedRecords();
+function initRecords() {
+  const allRecords = getDatabaseRecords();
   let filteredRecords = allRecords;
 
   // Restrict standard users to only see records for their assigned office
