@@ -2450,6 +2450,8 @@ function deleteRecord(recordId) {
   archived.push(record);
   localStorage.setItem('purchaseRequestArchive', JSON.stringify(archived));
   setDatabaseRecords(records);
+  initRecords();
+  initArchive();
   applyDashboardFilters();
   alert('Record archived successfully! It can be restored within 30 days from the Archive menu.');
 }
