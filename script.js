@@ -76,6 +76,8 @@ let userAccountsCache = [];
 let userAccountsPage = 1;
 let userAccountsSearch = '';
 let pendingPasswordResetEmail = '';
+let firestoreRecordsCache = [];
+let firestoreRecordsLoaded = false;
 const USER_ACCOUNTS_PER_PAGE = 15;
 
 function initializeFirebaseAuth() {
@@ -286,6 +288,28 @@ async function getPurchaseRequestsForUser() {
   }
 }
 
+async function syncFirestoreRecords() {
+  if (!currentAuthUser || !getFirestoreInstance()) {
+    firestoreRecordsCache = [];
+    firestoreRecordsLoaded = false;
+    return;
+  }
+
+  try {
+    const records = await getPurchaseRequestsForUser();
+    firestoreRecordsCache = records.map(record => ({
+      ...record,
+      id: record.id || (record.prNumber ? String(record.prNumber) : generateRecordId())
+    }));
+    firestoreRecordsLoaded = true;
+    setDatabaseRecords(firestoreRecordsCache);
+  } catch (error) {
+    console.error('Error syncing Firestore records:', error);
+    firestoreRecordsCache = [];
+    firestoreRecordsLoaded = false;
+  }
+}
+
 /**
  * Retrieves a single purchase request by ID
  */
@@ -389,7 +413,11 @@ async function handleAuthStateChanged(user) {
   // Save user profile to Firestore when they successfully authenticate
   if (user && currentUserProfile) {
     await saveUserProfileToFirestore(user);
-    logAuditEvent('user_signin', { email: user.email });
+    await logAuditEvent('user_signin', { email: user.email });
+    await syncFirestoreRecords();
+  } else {
+    firestoreRecordsCache = [];
+    firestoreRecordsLoaded = false;
   }
   
   applyAuthState();
@@ -1788,7 +1816,7 @@ function validateAndBuildFormData() {
   return formData;
 }
 
-function persistFormData(formData) {
+async function persistFormData(formData) {
   const controlNumber = formData.controlNumber || generateControlNumber(formData);
   const isEditMode = formData.__meta?.isEditMode;
   const editPrNumber = formData.__meta?.editPrNumber;
@@ -1812,6 +1840,10 @@ function persistFormData(formData) {
       timestamp: new Date().toISOString()
     };
 
+    if (currentAuthUser && getFirestoreInstance() && updatedRecord.id) {
+      await updatePurchaseRequestInFirestore(updatedRecord.id, updatedRecord);
+    }
+
     records.unshift(updatedRecord);
     setDatabaseRecords(records);
     alert('Record updated successfully!');
@@ -1827,7 +1859,7 @@ function persistFormData(formData) {
   }
 
   // New record: save and then preview the saved version
-  saveRecordToDatabase(formData);
+  await saveRecordToDatabase(formData);
   // Ensure UI updated
   updateSummaryCards(getDatabaseRecords());
   renderRecordsTable(getDatabaseRecords());
@@ -1850,15 +1882,19 @@ function checkPreview() {
   showPreviewModal(formData);
 }
 
-function saveForm() {
+async function saveForm() {
   const formData = validateAndBuildFormData();
   if (!formData) return;
   if (!confirm('Please confirm: Are the details you entered correct? Click OK to save and preview.')) return;
   // Persist then preview the saved record
-  persistFormData(formData);
+  await persistFormData(formData);
 }
 
 function getDatabaseRecords() {
+  if (currentAuthUser && firestoreRecordsLoaded) {
+    return firestoreRecordsCache.map(record => ({ ...record }));
+  }
+
   const raw = JSON.parse(localStorage.getItem('purchaseRequestDatabase') || '[]');
   if (!Array.isArray(raw)) return [];
 
@@ -1880,6 +1916,9 @@ function getDatabaseRecords() {
 }
 
 function setDatabaseRecords(records) {
+  if (currentAuthUser && firestoreRecordsLoaded) {
+    firestoreRecordsCache = records.map(record => ({ ...record }));
+  }
   localStorage.setItem('purchaseRequestDatabase', JSON.stringify(records));
 }
 
@@ -1898,7 +1937,7 @@ function getItemSummary(item) {
   };
 }
 
-function saveRecordToDatabase(formData) {
+async function saveRecordToDatabase(formData) {
   const records = getDatabaseRecords();
   const summary = getItemSummary(formData.items[0] || {});
   const parsedDate = parseDateString(formData.prDate);
@@ -1914,6 +1953,37 @@ function saveRecordToDatabase(formData) {
     year: parsedDate ? String(parsedDate.getFullYear()) : '',
     timestamp: formData.timestamp || new Date().toISOString()
   };
+
+  if (currentAuthUser && getFirestoreInstance()) {
+    try {
+      if (record.id) {
+        await updatePurchaseRequestInFirestore(record.id, record);
+      } else {
+        const savedId = await savePurchaseRequestToFirestore(record);
+        if (savedId) {
+          record.id = savedId;
+        }
+      }
+      const index = record.id
+        ? records.findIndex(r => r.id === record.id)
+        : record.prNumber
+          ? records.findIndex(r => r.prNumber === record.prNumber)
+          : -1;
+      if (index >= 0) {
+        records[index] = record;
+      } else {
+        records.unshift(record);
+      }
+      firestoreRecordsCache = records.map(rec => ({ ...rec }));
+      firestoreRecordsLoaded = true;
+      setDatabaseRecords(records);
+      loadDatabaseRecords();
+      return;
+    } catch (error) {
+      console.error('Error saving record to Firestore:', error);
+    }
+  }
+
   const index = record.id
     ? records.findIndex(r => r.id === record.id)
     : record.prNumber
