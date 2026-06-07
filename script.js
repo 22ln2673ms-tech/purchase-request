@@ -72,6 +72,7 @@ let currentAuthUser = null;
 let currentUserProfile = null;
 let firebaseAuth = null;
 let firestoreDb = null;
+let purchaseRequestsUnsubscribe = null;
 let userAccountsCache = [];
 let userAccountsPage = 1;
 let userAccountsSearch = '';
@@ -92,7 +93,13 @@ function initializeFirebaseAuth() {
   }
 
   firebaseAuth = firebase.auth();
-  firestoreDb = firebase.firestore();
+  // initialize firestore correctly (fix typo)
+  try {
+    firestoreDb = firebase.firestore();
+  } catch (e) {
+    console.warn('Unable to initialize Firestore instance:', e);
+    firestoreDb = null;
+  }
   firebaseAuth.onAuthStateChanged(handleAuthStateChanged);
 }
 
@@ -189,7 +196,6 @@ async function savePurchaseRequestToFirestore(requestData) {
     console.error('No authenticated user');
     return null;
   }
-
   const db = getFirestoreInstance();
   if (!db) {
     console.error('Firestore not available');
@@ -197,8 +203,10 @@ async function savePurchaseRequestToFirestore(requestData) {
   }
 
   try {
-    const docRef = await db.collection('purchaseRequests').add({
-      ...requestData,
+    // sanitize requestData before sending to Firestore
+    const clean = cleanForFirestore(requestData || {});
+    const payload = {
+      ...clean,
       createdBy: {
         uid: currentAuthUser.uid,
         email: currentAuthUser.email,
@@ -208,8 +216,10 @@ async function savePurchaseRequestToFirestore(requestData) {
       },
       createdAt: firebase.firestore.FieldValue.serverTimestamp(),
       updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
-      status: requestData.status || 'draft'
-    });
+      status: clean.status || requestData.status || 'draft'
+    };
+
+    const docRef = await db.collection('purchaseRequests').add(payload);
 
     console.log('Purchase request saved:', docRef.id);
     return docRef.id;
@@ -223,6 +233,36 @@ async function savePurchaseRequestToFirestore(requestData) {
 /**
  * Updates an existing purchase request in Firestore
  */
+/**
+ * Clean an object for Firestore by removing undefined values and
+ * internal metadata keys (properties that start with __).
+ */
+function cleanForFirestore(obj) {
+  if (obj === null || obj === undefined) return obj;
+  if (Array.isArray(obj)) return obj.map(v => cleanForFirestore(v));
+  if (typeof obj !== 'object') return obj;
+
+  const out = {};
+  Object.entries(obj).forEach(([k, v]) => {
+    if (k && k.startsWith('__')) return; // skip internal metadata
+    if (v === undefined) return; // skip undefined
+    if (v === null) {
+      out[k] = null;
+      return;
+    }
+    if (Array.isArray(v)) {
+      out[k] = v.map(item => cleanForFirestore(item));
+      return;
+    }
+    if (typeof v === 'object') {
+      out[k] = cleanForFirestore(v);
+      return;
+    }
+    out[k] = v;
+  });
+  return out;
+}
+
 async function updatePurchaseRequestInFirestore(requestId, updates) {
   if (!currentAuthUser) {
     console.error('No authenticated user');
@@ -233,15 +273,18 @@ async function updatePurchaseRequestInFirestore(requestId, updates) {
   if (!db) return false;
 
   try {
-    await db.collection('purchaseRequests').doc(requestId).update({
-      ...updates,
+    const clean = cleanForFirestore(updates || {});
+    const payload = {
+      ...clean,
       updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
       updatedBy: {
         uid: currentAuthUser.uid,
         email: currentAuthUser.email,
         name: currentUserProfile?.displayName
       }
-    });
+    };
+
+    await db.collection('purchaseRequests').doc(requestId).update(payload);
 
     console.log('Purchase request updated:', requestId);
     return true;
@@ -261,30 +304,72 @@ async function getPurchaseRequestsForUser() {
   if (!db || !currentAuthUser) return [];
 
   try {
+    // Build a simple query: filter by office for standard users but do not
+    // apply server-side ordering to avoid requiring composite indexes.
     let query = db.collection('purchaseRequests');
-
-    // Standard users only see requests from their office
     if (isStandardUser()) {
       query = query.where('createdBy.office', '==', currentUserProfile.office);
     }
 
-    // Order by most recent first
-    query = query.orderBy('createdAt', 'desc');
-
     const snapshot = await query.get();
     const requests = [];
-    
-    snapshot.forEach(doc => {
-      requests.push({
-        id: doc.id,
-        ...doc.data()
-      });
+    snapshot.forEach(doc => requests.push({ id: doc.id, ...doc.data() }));
+
+    // Order results client-side by `createdAt` (if present) so Firestore
+    // doesn't require a composite index for where+orderBy.
+    requests.sort((a, b) => {
+      const ta = a.createdAt && a.createdAt.toDate ? a.createdAt.toDate().getTime() : (a.createdAt ? new Date(a.createdAt).getTime() : 0);
+      const tb = b.createdAt && b.createdAt.toDate ? b.createdAt.toDate().getTime() : (b.createdAt ? new Date(b.createdAt).getTime() : 0);
+      return tb - ta;
     });
 
     return requests;
   } catch (error) {
     console.error('Error fetching purchase requests:', error);
     return [];
+  }
+}
+
+/**
+ * Start a realtime listener for purchaseRequests. Admins listen for all
+ * requests; standard users listen for requests matching their office.
+ * Updates `firestoreRecordsCache` and UI on changes.
+ */
+function startPurchaseRequestsListener() {
+  const db = getFirestoreInstance();
+  if (!db || !currentAuthUser) return;
+  // Stop existing listener if any
+  stopPurchaseRequestsListener();
+
+  let query = db.collection('purchaseRequests');
+  if (isStandardUser()) {
+    query = query.where('createdBy.office', '==', currentUserProfile.office);
+  }
+
+  purchaseRequestsUnsubscribe = query.onSnapshot(snapshot => {
+    const requests = [];
+    snapshot.forEach(doc => requests.push({ id: doc.id, ...doc.data() }));
+    // client-side sort by createdAt desc
+    requests.sort((a, b) => {
+      const ta = a.createdAt && a.createdAt.toDate ? a.createdAt.toDate().getTime() : (a.createdAt ? new Date(a.createdAt).getTime() : 0);
+      const tb = b.createdAt && b.createdAt.toDate ? b.createdAt.toDate().getTime() : (b.createdAt ? new Date(b.createdAt).getTime() : 0);
+      return tb - ta;
+    });
+    firestoreRecordsCache = requests.map(r => ({ ...r }));
+    firestoreRecordsLoaded = true;
+    setDatabaseRecords(firestoreRecordsCache);
+    // refresh UI
+    updateSummaryCards(getDatabaseRecords());
+    renderRecordsTable(getDatabaseRecords());
+  }, error => {
+    console.error('Realtime listener error:', error);
+  });
+}
+
+function stopPurchaseRequestsListener() {
+  if (purchaseRequestsUnsubscribe) {
+    try { purchaseRequestsUnsubscribe(); } catch (e) {}
+    purchaseRequestsUnsubscribe = null;
   }
 }
 
@@ -414,6 +499,14 @@ async function handleAuthStateChanged(user) {
   if (user && currentUserProfile) {
     await saveUserProfileToFirestore(user);
     await logAuditEvent('user_signin', { email: user.email });
+    // Migrate any localStorage-only records to Firestore before syncing
+    try {
+      await migrateLocalRecordsToFirestore();
+    } catch (e) {
+      console.warn('Local-to-Firestore migration failed:', e);
+    }
+    // start realtime listener for purchaseRequests (admins see all, users see office)
+    startPurchaseRequestsListener();
     await syncFirestoreRecords();
   } else {
     firestoreRecordsCache = [];
@@ -452,6 +545,8 @@ function signOutFirebase() {
   // Log the sign out event before signing out
   const email = currentAuthUser?.email;
   logAuditEvent('user_signout', { email: email });
+  // stop realtime listeners
+  stopPurchaseRequestsListener();
   
   auth.signOut().catch(error => {
     console.error('Sign out failed', error);
@@ -1919,7 +2014,18 @@ function setDatabaseRecords(records) {
   if (currentAuthUser && firestoreRecordsLoaded) {
     firestoreRecordsCache = records.map(record => ({ ...record }));
   }
-  localStorage.setItem('purchaseRequestDatabase', JSON.stringify(records));
+  // Clean records of internal metadata (keys starting with __) and
+  // undefined values before persisting to localStorage. This prevents
+  // fields like `__meta.editPrNumber` from being stored and later
+  // causing Firestore update errors.
+  try {
+    const cleaned = Array.isArray(records) ? records.map(r => cleanForFirestore(r || {})) : [];
+    localStorage.setItem('purchaseRequestDatabase', JSON.stringify(cleaned));
+  } catch (e) {
+    console.warn('Failed to write database records to localStorage:', e);
+    // Fallback to raw write
+    try { localStorage.setItem('purchaseRequestDatabase', JSON.stringify(records)); } catch (e2) {}
+  }
 }
 
 function formatDimensionLabel(width, height, unit) {
@@ -1954,9 +2060,11 @@ async function saveRecordToDatabase(formData) {
     timestamp: formData.timestamp || new Date().toISOString()
   };
 
+  const isEditMode = formData.__meta?.isEditMode;
+
   if (currentAuthUser && getFirestoreInstance()) {
     try {
-      if (record.id) {
+      if (isEditMode && record.id) {
         await updatePurchaseRequestInFirestore(record.id, record);
       } else {
         const savedId = await savePurchaseRequestToFirestore(record);
@@ -1964,6 +2072,7 @@ async function saveRecordToDatabase(formData) {
           record.id = savedId;
         }
       }
+
       const index = record.id
         ? records.findIndex(r => r.id === record.id)
         : record.prNumber
@@ -1996,6 +2105,77 @@ async function saveRecordToDatabase(formData) {
   }
   setDatabaseRecords(records);
   loadDatabaseRecords();
+}
+
+/**
+ * Migrate records stored in localStorage (`purchaseRequestDatabase`) to Firestore.
+ * Skips records that already exist in Firestore (by id, prNumber, or timestamp).
+ */
+async function migrateLocalRecordsToFirestore() {
+  const db = getFirestoreInstance();
+  if (!db || !currentAuthUser) return;
+
+  let local = JSON.parse(localStorage.getItem('purchaseRequestDatabase') || '[]');
+  if (!Array.isArray(local) || local.length === 0) return;
+
+  try {
+    // Fetch existing purchase requests for this user (to avoid duplicates)
+    const snapshot = await db.collection('purchaseRequests')
+      .where('createdBy.uid', '==', currentAuthUser.uid)
+      .get();
+
+    const existing = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+    const existingIds = new Set(existing.map(e => String(e.id)));
+    const existingPrNumbers = new Set(existing.map(e => String(e.prNumber || '').trim()));
+    const existingTimestamps = new Set(existing.map(e => String(e.timestamp || '').trim()));
+
+    let migrated = 0;
+
+    for (let i = 0; i < local.length; i++) {
+      const rec = local[i];
+      const recId = rec.id ? String(rec.id) : '';
+      const prNum = rec.prNumber ? String(rec.prNumber).trim() : '';
+      const ts = rec.timestamp ? String(rec.timestamp).trim() : '';
+
+      if (recId && existingIds.has(recId)) continue;
+      if (prNum && existingPrNumbers.has(prNum)) continue;
+      if (ts && existingTimestamps.has(ts)) continue;
+
+      // Prepare record for Firestore
+      const cleanRec = cleanForFirestore(rec || {});
+      const upload = {
+        ...cleanRec,
+        createdBy: {
+          uid: currentAuthUser.uid,
+          email: currentAuthUser.email,
+          name: currentUserProfile?.displayName,
+          role: currentUserProfile?.role,
+          office: currentUserProfile?.office
+        },
+        createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+        status: cleanRec.status || rec.status || rec.approvalStatus || 'draft'
+      };
+
+      try {
+        const added = await db.collection('purchaseRequests').add(upload);
+        // update local copy id so it maps to Firestore
+        rec.id = added.id;
+        migrated++;
+      } catch (err) {
+        console.warn('Failed migrating record to Firestore', err, rec);
+      }
+    }
+
+    if (migrated > 0) {
+      // Save updated local storage (now containing Firestore ids)
+      localStorage.setItem('purchaseRequestDatabase', JSON.stringify(local));
+      await logAuditEvent('migrate_local_records', { migrated });
+      console.log(`Migrated ${migrated} local record(s) to Firestore`);
+    }
+  } catch (error) {
+    console.error('Migration error:', error);
+  }
 }
 
 function loadDatabaseRecords() {
