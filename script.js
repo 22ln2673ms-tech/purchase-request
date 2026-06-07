@@ -79,6 +79,8 @@ let userAccountsSearch = '';
 let pendingPasswordResetEmail = '';
 let firestoreRecordsCache = [];
 let firestoreRecordsLoaded = false;
+let archiveRecordsCache = [];
+let archiveRecordsLoaded = false;
 let notificationsCache = [];
 let notificationsLoaded = false;
 const USER_ACCOUNTS_PER_PAGE = 15;
@@ -218,7 +220,7 @@ async function savePurchaseRequestToFirestore(requestData) {
       },
       createdAt: firebase.firestore.FieldValue.serverTimestamp(),
       updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
-      status: clean.status || requestData.status || 'draft'
+      status: clean.status || requestData.status || requestData.approvalStatus || 'pending'
     };
 
     const docRef = await db.collection('purchaseRequests').add(payload);
@@ -487,6 +489,29 @@ async function markAllNotificationsRead() {
     await batch.commit();
   } catch (error) {
     console.error('Error marking all notifications read:', error);
+  }
+
+  await loadNotifications();
+}
+
+async function deleteAllNotifications() {
+  if (!getFirestoreInstance() || !notificationsCache.length) return;
+  if (!confirm('⚠️ Delete all notifications?\n\nThis will permanently remove all notifications visible to you and cannot be undone.')) return;
+
+  const db = getFirestoreInstance();
+
+  try {
+    const batch = db.batch();
+    notificationsCache.forEach(notification => {
+      if (notification.id) {
+        const ref = db.collection('notifications').doc(notification.id);
+        batch.delete(ref);
+      }
+    });
+    await batch.commit();
+  } catch (error) {
+    console.error('Error deleting all notifications:', error);
+    alert('Failed to delete notifications. Check the console for details.');
   }
 
   await loadNotifications();
@@ -1958,6 +1983,9 @@ document.addEventListener('DOMContentLoaded', () => {
   const markAllNotificationsReadBtn = document.getElementById('markAllNotificationsReadBtn');
   if (markAllNotificationsReadBtn) markAllNotificationsReadBtn.addEventListener('click', markAllNotificationsRead);
 
+  const deleteAllNotificationsBtn = document.getElementById('deleteAllNotificationsBtn');
+  if (deleteAllNotificationsBtn) deleteAllNotificationsBtn.addEventListener('click', deleteAllNotifications);
+
   const archiveSearchBox = document.getElementById('archiveSearchBox');
   if (archiveSearchBox) archiveSearchBox.addEventListener('input', filterArchive);
 
@@ -2267,6 +2295,17 @@ async function saveForm() {
   await persistFormData(formData);
 }
 
+function normalizeRecordStatus(record) {
+  if (!record || typeof record !== 'object') return record;
+  const normalized = { ...record };
+  const status = String(normalized.approvalStatus || normalized.status || '').toLowerCase().trim();
+  if (status) {
+    normalized.approvalStatus = status;
+    normalized.status = status;
+  }
+  return normalized;
+}
+
 function isVisibleRecord(record) {
   if (!record || typeof record !== 'object') return false;
   const status = String(record.approvalStatus || record.status || '').toLowerCase().trim();
@@ -2277,6 +2316,7 @@ function isVisibleRecord(record) {
 function getDatabaseRecords() {
   if (currentAuthUser && firestoreRecordsLoaded) {
     return firestoreRecordsCache
+      .map(normalizeRecordStatus)
       .filter(isVisibleRecord)
       .map(record => ({ ...record }));
   }
@@ -2286,7 +2326,10 @@ function getDatabaseRecords() {
 
   let updated = false;
   const records = raw.map(r => {
-    const record = { ...r, prNumber: (r.prNumber ? String(r.prNumber).replace(/^AUTO-/, '') : r.prNumber) };
+    const record = normalizeRecordStatus({
+      ...r,
+      prNumber: (r.prNumber ? String(r.prNumber).replace(/^AUTO-/, '') : r.prNumber)
+    });
     if (!record.id) {
       record.id = record.timestamp || generateRecordId();
       updated = true;
@@ -2348,6 +2391,7 @@ async function saveRecordToDatabase(formData) {
     ...formData,
     controlNumber: formData.controlNumber || generateControlNumber(formData),
     approvalStatus: formData.approvalStatus || 'pending',
+    status: formData.status || formData.approvalStatus || 'pending',
     nature: summary.nature,
     size: summary.size,
     quantity: summary.quantity,
@@ -2565,7 +2609,8 @@ function initRecords() {
   renderRecordsTable(filteredRecords);
 }
 
-function initArchive() {
+async function initArchive() {
+  await loadArchiveRecordsFromFirestore();
   const archivedRecords = getArchiveRecords();
   updateArchiveYearFilter(archivedRecords);
   renderArchiveTable(archivedRecords);
@@ -2573,23 +2618,53 @@ function initArchive() {
 
 function getArchiveRecords() {
   const raw = JSON.parse(localStorage.getItem('purchaseRequestArchive') || '[]');
-  if (!Array.isArray(raw)) return [];
-
-  let updated = false;
-  const records = raw.map(r => {
+  const localRecords = Array.isArray(raw) ? raw.map(r => {
     const record = { ...r, prNumber: (r.prNumber ? String(r.prNumber).replace(/^AUTO-/, '') : r.prNumber) };
     if (!record.id) {
       record.id = record.archivedAt || record.timestamp || generateRecordId();
-      updated = true;
     }
-    return record;
-  });
+    return normalizeRecordStatus(record);
+  }) : [];
 
-  if (updated) {
-    localStorage.setItem('purchaseRequestArchive', JSON.stringify(records));
+  if (!archiveRecordsLoaded || !Array.isArray(archiveRecordsCache) || archiveRecordsCache.length === 0) {
+    return localRecords;
   }
 
-  return records;
+  const merged = [...localRecords];
+  archiveRecordsCache.forEach(firestoreRecord => {
+    const existingIndex = merged.findIndex(r => r.id && firestoreRecord.id && r.id === firestoreRecord.id);
+    if (existingIndex >= 0) {
+      merged[existingIndex] = firestoreRecord;
+    } else {
+      merged.push(normalizeRecordStatus(firestoreRecord));
+    }
+  });
+
+  return merged;
+}
+
+async function loadArchiveRecordsFromFirestore() {
+  const db = getFirestoreInstance();
+  if (!db || !currentAuthUser) {
+    archiveRecordsCache = [];
+    archiveRecordsLoaded = true;
+    return;
+  }
+
+  try {
+    let query = db.collection('purchaseRequests').where('status', '==', 'deleted');
+    if (!isAdminUser()) {
+      query = query.where('createdBy.uid', '==', currentAuthUser.uid);
+    }
+
+    const snapshot = await query.get();
+    archiveRecordsCache = snapshot.docs.map(doc => normalizeRecordStatus({ id: doc.id, ...doc.data() }));
+  } catch (error) {
+    console.warn('Failed to load archived records from Firestore:', error);
+    archiveRecordsCache = [];
+  } finally {
+    archiveRecordsLoaded = true;
+  }
 }
 
 function updateRecordsYearFilter(records) {
@@ -2811,35 +2886,69 @@ function filterArchive() {
   renderArchiveTable(records);
 }
 
-function restoreArchivedRecord(recordId) {
+async function restoreArchivedRecord(recordId) {
   const archived = getArchiveRecords();
   const index = archived.findIndex(record => record.id === recordId || cleanPrNumber(record.prNumber) === recordId);
   if (index === -1) return;
+
   const [record] = archived.splice(index, 1);
-  record.archivedAt = undefined;
-  const activeRecords = getDatabaseRecords();
-  activeRecords.unshift(record);
-  setDatabaseRecords(activeRecords);
+  const restoredRecord = normalizeRecordStatus({
+    ...record,
+    archivedAt: undefined,
+    deletedBy: undefined,
+    deletedAt: undefined,
+    status: 'rejected',
+    approvalStatus: 'rejected'
+  });
+
   localStorage.setItem('purchaseRequestArchive', JSON.stringify(archived));
+  archiveRecordsCache = archiveRecordsCache.filter(r => r.id !== restoredRecord.id);
+
+  const activeRecords = getDatabaseRecords();
+  activeRecords.unshift(restoredRecord);
+  setDatabaseRecords(activeRecords);
+
+  if (restoredRecord.id && getFirestoreInstance()) {
+    await updatePurchaseRequestInFirestore(restoredRecord.id, {
+      status: restoredRecord.status,
+      approvalStatus: restoredRecord.approvalStatus,
+      deletedBy: null,
+      deletedAt: null
+    }).catch(error => console.warn('Failed to restore archived record in Firestore:', error));
+  }
+
   alert('Record restored successfully.');
-  initArchive();
   initRecords();
+  initArchive();
 }
 
-function permanentlyDeleteArchived(recordId) {
+async function permanentlyDeleteArchived(recordId) {
   if (!confirm('⚠️ PERMANENT DELETE\n\nThis will permanently delete this archived record and cannot be undone.\n\nAre you sure?')) {
     return;
   }
   const archived = getArchiveRecords();
   const index = archived.findIndex(record => record.id === recordId || cleanPrNumber(record.prNumber) === recordId);
   if (index === -1) return;
-  archived.splice(index, 1);
+
+  const [record] = archived.splice(index, 1);
   localStorage.setItem('purchaseRequestArchive', JSON.stringify(archived));
+  archiveRecordsCache = archiveRecordsCache.filter(r => r.id !== recordId);
+
+  const db = getFirestoreInstance();
+  if (db && record.id) {
+    try {
+      await db.collection('purchaseRequests').doc(record.id).delete();
+    } catch (error) {
+      console.warn('Failed to delete archived Firestore record:', error);
+    }
+  }
+
   alert('✓ Record permanently deleted.');
   initArchive();
 }
 
 async function deleteAllArchivedRecords() {
+  await loadArchiveRecordsFromFirestore();
   const archived = getArchiveRecords();
   if (!archived.length) {
     alert('There are no archived records to delete.');
@@ -2866,6 +2975,8 @@ async function deleteAllArchivedRecords() {
   }
 
   localStorage.setItem('purchaseRequestArchive', JSON.stringify([]));
+  archiveRecordsCache = [];
+  archiveRecordsLoaded = false;
   initArchive();
   applyDashboardFilters();
   alert('All archived records have been deleted.');
@@ -3061,13 +3172,13 @@ async function approveRecord(recordId) {
   const index = records.findIndex(r => r.id === recordId || cleanPrNumber(r.prNumber) === recordId);
   if (index === -1) return;
 
-  const updatedRecord = {
+  const updatedRecord = normalizeRecordStatus({
     ...records[index],
     approvalStatus: 'approved',
     status: 'approved',
     approvalBy: currentUserProfile?.displayName || 'Admin',
     approvalAt: new Date().toISOString()
-  };
+  });
 
   records[index] = updatedRecord;
   setDatabaseRecords(records);
@@ -3095,13 +3206,13 @@ async function rejectRecord(recordId) {
   const index = records.findIndex(r => r.id === recordId || cleanPrNumber(r.prNumber) === recordId);
   if (index === -1) return;
 
-  const updatedRecord = {
+  const updatedRecord = normalizeRecordStatus({
     ...records[index],
     approvalStatus: 'rejected',
     status: 'rejected',
     approvalBy: currentUserProfile?.displayName || 'Admin',
     approvalAt: new Date().toISOString()
-  };
+  });
 
   records[index] = updatedRecord;
   setDatabaseRecords(records);

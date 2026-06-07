@@ -427,7 +427,10 @@
           <h2>Notifications</h2>
           <p>View your latest messages and system alerts here.</p>
         </div>
-        <button id="markAllNotificationsReadBtn" class="button button--secondary">Mark all as read</button>
+        <div class="notification-action-group">
+          <button id="markAllNotificationsReadBtn" class="button button--secondary">Mark all as read</button>
+          <button id="deleteAllNotificationsBtn" class="button button--danger">Delete all</button>
+        </div>
       </div>
       <div class="notifications-list" id="notificationsList">
         <div class="empty-state">Loading notifications...</div>
