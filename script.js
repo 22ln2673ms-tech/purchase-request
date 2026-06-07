@@ -572,13 +572,10 @@ async function updatePurchaseRequestInFirestore(requestId, updates) {
     };
 
     const docRef = db.collection('purchaseRequests').doc(requestId);
-    const docSnapshot = await docRef.get();
-    if (docSnapshot.exists) {
-      await docRef.update(payload);
-    } else {
-      console.warn('Purchase request document not found, creating document with merge:', requestId);
+      // Use set with merge to ensure we don't accidentally overwrite fields
+      // when applying partial updates (safer than update in environments
+      // where network/proxy may interfere with update operations).
       await docRef.set(payload, { merge: true });
-    }
 
     console.log('Purchase request updated:', requestId);
     return true;
@@ -649,13 +646,27 @@ function startPurchaseRequestsListener() {
       const record = { id: doc.id, ...doc.data() };
       if (isVisibleRecord(record)) requests.push(record);
     });
-    // client-side sort by createdAt desc
-    requests.sort((a, b) => {
+
+    // Merge server snapshot with localStorage records so local-only changes
+    // (e.g., archived/deleted markers) are not clobbered by an older server
+    // snapshot. Read local storage records and include them in the merge.
+    let localRaw = [];
+    try { localRaw = JSON.parse(localStorage.getItem('purchaseRequestDatabase') || '[]'); } catch (e) { localRaw = []; }
+    const localRecords = Array.isArray(localRaw) ? localRaw.map(r => normalizeRecordStatus({
+      ...r,
+      prNumber: (r.prNumber ? String(r.prNumber).replace(/^AUTO-/, '') : r.prNumber)
+    })) : [];
+
+    // Combine local + server and dedupe preferring newest lastModified/timestamp
+    const combined = [...localRecords, ...requests];
+    // client-side sort by createdAt desc after dedupe
+    const deduped = dedupeRecords(combined);
+    deduped.sort((a, b) => {
       const ta = a.createdAt && a.createdAt.toDate ? a.createdAt.toDate().getTime() : (a.createdAt ? new Date(a.createdAt).getTime() : 0);
       const tb = b.createdAt && b.createdAt.toDate ? b.createdAt.toDate().getTime() : (b.createdAt ? new Date(b.createdAt).getTime() : 0);
       return tb - ta;
     });
-    firestoreRecordsCache = requests.map(r => ({ ...r }));
+    firestoreRecordsCache = deduped.map(r => ({ ...r }));
     firestoreRecordsLoaded = true;
     setDatabaseRecords(firestoreRecordsCache);
     // refresh UI
@@ -682,7 +693,7 @@ async function syncFirestoreRecords() {
 
   try {
     const records = await getPurchaseRequestsForUser();
-    firestoreRecordsCache = records.map(record => ({
+    firestoreRecordsCache = dedupeRecords(records).map(record => ({
       ...record,
       id: record.id || (record.prNumber ? String(record.prNumber) : generateRecordId())
     }));
@@ -728,16 +739,27 @@ async function logAuditEvent(action, details) {
   if (!db || !currentAuthUser) return;
 
   try {
-    await db.collection('auditLog').add({
+    const cleanDetails = typeof details === 'object' && details !== null
+      ? cleanForFirestore(details)
+      : details;
+
+    const payload = {
       action: action,
-      details: details,
+      details: cleanDetails,
       userId: currentAuthUser.uid,
       userEmail: currentAuthUser.email,
       userRole: currentUserProfile?.role,
       userOffice: currentUserProfile?.office,
       timestamp: firebase.firestore.FieldValue.serverTimestamp()
-    });
+    };
+
+    const docRef = db.collection('auditLog').doc();
+    await docRef.set(payload);
   } catch (error) {
+    if (error?.code === 'already-exists') {
+      console.warn('Audit event already exists, skipping duplicate:', action, details);
+      return;
+    }
     console.error('Error logging audit event:', error);
   }
 }
@@ -1362,12 +1384,45 @@ function resolveDepartmentCode(value) {
 
 // Normalize PR number display: strip leading AUTO- prefix if present
 function cleanPrNumber(pr) {
-  if (!pr) return pr;
+  if (!pr) return '';
   try {
     return String(pr).replace(/^AUTO-/, '');
   } catch (e) {
-    return pr;
+    return String(pr);
   }
+}
+
+function getRecordIdentifier(record) {
+  if (!record || typeof record !== 'object') return '';
+  if (record.prNumber) return String(cleanPrNumber(record.prNumber));
+  if (record.id) return String(record.id);
+  if (record.timestamp) return String(record.timestamp);
+  return String(generateRecordId());
+}
+
+function dedupeRecords(records) {
+  if (!Array.isArray(records)) return [];
+  const recordMap = new Map();
+  records.forEach(record => {
+    const normalized = normalizeRecordStatus(record || {});
+    const key = getRecordIdentifier(normalized);
+    if (!key) return;
+    const existing = recordMap.get(key);
+    if (!existing) {
+      recordMap.set(key, normalized);
+      return;
+    }
+    // Use lastModified if available (tracks status/approval changes), otherwise use timestamp (creation time)
+    const currentTs = new Date(normalized.lastModified || normalized.timestamp || 0).getTime();
+    const existingTs = new Date(existing.lastModified || existing.timestamp || 0).getTime();
+    if (currentTs >= existingTs) {
+      // Merge existing and normalized so that partial updates (e.g. status
+      // changes) do not wipe other fields. Normalized takes precedence.
+      const merged = { ...existing, ...normalized };
+      recordMap.set(key, merged);
+    }
+  });
+  return Array.from(recordMap.values());
 }
 
 const sectionSelect = document.getElementById('section');
@@ -2347,19 +2402,19 @@ function getDatabaseRecords() {
     setDatabaseRecords(records);
   }
 
-  return records;
+  return dedupeRecords(records);
 }
 
 function setDatabaseRecords(records) {
   if (currentAuthUser && firestoreRecordsLoaded) {
-    firestoreRecordsCache = records.map(record => ({ ...record }));
+    firestoreRecordsCache = dedupeRecords(records).map(record => ({ ...record }));
   }
   // Clean records of internal metadata (keys starting with __) and
   // undefined values before persisting to localStorage. This prevents
   // fields like `__meta.editPrNumber` from being stored and later
   // causing Firestore update errors.
   try {
-    const cleaned = Array.isArray(records) ? records.map(r => cleanForFirestore(r || {})) : [];
+    const cleaned = Array.isArray(records) ? dedupeRecords(records).map(r => cleanForFirestore(r || {})) : [];
     localStorage.setItem('purchaseRequestDatabase', JSON.stringify(cleaned));
   } catch (e) {
     console.warn('Failed to write database records to localStorage:', e);
@@ -2699,7 +2754,7 @@ function renderRecordsTable(records) {
   }
 
   tbody.innerHTML = records.map(record => {
-    const recordId = record.id || cleanPrNumber(record.prNumber);
+    const recordId = getRecordIdentifier(record);
     const amountString = record.grandTotal || record.cost || '₱0.00';
     const amount = parseFloat(amountString.replace(/[₱,]/g, '') || '0') || 0;
     const branch = getRecordBranch(record) || '-';
@@ -2825,7 +2880,7 @@ function renderArchiveTable(records) {
   }
 
   tbody.innerHTML = records.map(record => {
-    const recordId = record.id || cleanPrNumber(record.prNumber);
+    const recordId = getRecordIdentifier(record);
     const controlNumber = record.controlNumber || record.prNumber || 'TBD';
     const amountString = record.grandTotal || record.cost || '₱0.00';
     const amount = parseFloat(amountString.replace(/[₱,]/g, '') || '0') || 0;
@@ -3120,7 +3175,7 @@ function renderSavedRecordsTable(records) {
     const item = (record.items && record.items[0]) || {};
     const itemSize = formatRecordSize(record);
     const quantity = record.quantity || item.quantity || '-';
-    const recordId = record.id || cleanPrNumber(record.prNumber);
+    const recordId = getRecordIdentifier(record);
     const actions = `<button class="record-action-btn" onclick="openRecord('${recordId}', 'view')">View</button>`;
 
     return `
@@ -3140,59 +3195,101 @@ function renderSavedRecordsTable(records) {
 async function deleteRecord(recordId) {
   if (!confirm('Are you sure you want to archive this record? It can be restored within 30 days.')) return;
   const records = getDatabaseRecords();
-  const index = records.findIndex(r => r.id === recordId || cleanPrNumber(r.prNumber) === recordId);
-  if (index === -1) return;
-  const [record] = records.splice(index, 1);
-  record.archivedAt = new Date().toISOString();
-  record.status = 'deleted';
-  record.approvalStatus = 'deleted';
-  record.deletedBy = currentUserProfile?.displayName || currentAuthUser?.email || 'Admin';
-  record.deletedAt = new Date().toISOString();
-  const archived = JSON.parse(localStorage.getItem('purchaseRequestArchive') || '[]');
-  archived.push(record);
-  localStorage.setItem('purchaseRequestArchive', JSON.stringify(archived));
-  if (record.id && getFirestoreInstance()) {
-    await updatePurchaseRequestInFirestore(record.id, {
-      status: 'deleted',
-      approvalStatus: 'deleted',
-      deletedBy: record.deletedBy,
-      deletedAt: record.deletedAt
-    }).catch(error => console.warn('Failed to persist archive/delete status to Firestore:', error));
+  const recordIndex = records.findIndex(r => getRecordIdentifier(r) === recordId);
+  if (recordIndex === -1) {
+    console.warn('Archive action could not find record for id:', recordId, records.map(getRecordIdentifier));
+    return;
   }
+  const [recordToArchive] = records.splice(recordIndex, 1);
+  recordToArchive.archivedAt = new Date().toISOString();
+  recordToArchive.status = 'deleted';
+  recordToArchive.approvalStatus = 'deleted';
+  recordToArchive.deletedBy = currentUserProfile?.displayName || currentAuthUser?.email || 'Admin';
+  recordToArchive.deletedAt = new Date().toISOString();
+  recordToArchive.lastModified = new Date().toISOString();
+  const archived = JSON.parse(localStorage.getItem('purchaseRequestArchive') || '[]');
+  archived.push(recordToArchive);
+  // Persist archive locally first
+  localStorage.setItem('purchaseRequestArchive', JSON.stringify(archived));
+
+  // If record has a Firestore id and Firestore is available, persist the
+  // deleted state to Firestore and only remove the active record if the
+  // server update succeeds. This avoids a race where a failed server
+  // update leaves the server copy in 'pending' which would later reappear
+  // via the realtime listener.
+  let persisted = true;
+  if (recordToArchive.id && getFirestoreInstance()) {
+    try {
+      // Persist full record so server has the same fields as the client.
+      const payload = { ...recordToArchive };
+      persisted = await updatePurchaseRequestInFirestore(recordToArchive.id, payload);
+    } catch (err) {
+      persisted = false;
+      console.warn('Failed to persist archive/delete status to Firestore:', err);
+    }
+  }
+
+  if (!persisted && recordToArchive.id && getFirestoreInstance()) {
+    // Revert local removal so UI matches server state and inform the user.
+    records.splice(recordIndex, 0, recordToArchive);
+    setDatabaseRecords(records);
+    initRecords();
+    applyDashboardFilters();
+    alert('Failed to archive record on server. Check your connection and try again.');
+    return;
+  }
+
+  // At this point either Firestore update succeeded, or the record was
+  // a purely local record; remove it from active records and refresh UI.
   setDatabaseRecords(records);
   initRecords();
   initArchive();
   applyDashboardFilters();
   alert('Record archived successfully! It can be restored within 30 days from the Archive menu.');
+
+  // Show the Archive view so the user sees the archived record immediately.
+  try {
+    window.location.hash = '#archive';
+  } catch (e) {
+    // ignore navigation errors
+  }
 }
 
 async function approveRecord(recordId) {
   if (!confirm('Are you sure you want to approve this record?')) return;
   const records = getDatabaseRecords();
-  const index = records.findIndex(r => r.id === recordId || cleanPrNumber(r.prNumber) === recordId);
-  if (index === -1) return;
-
+  const recordIndex = records.findIndex(r => getRecordIdentifier(r) === recordId);
+  if (recordIndex === -1) {
+    console.warn('Approve action could not find record for id:', recordId, records.map(getRecordIdentifier));
+    return;
+  }
+  const record = records[recordIndex];
+  console.log('Approving record (before):', record);
+  
   const updatedRecord = normalizeRecordStatus({
-    ...records[index],
+    ...record,
     approvalStatus: 'approved',
     status: 'approved',
     approvalBy: currentUserProfile?.displayName || 'Admin',
-    approvalAt: new Date().toISOString()
+    approvalAt: new Date().toISOString(),
+    lastModified: new Date().toISOString()
   });
+  
+  console.log('Approving record (after):', updatedRecord);
 
-  records[index] = updatedRecord;
+  records[recordIndex] = updatedRecord;
   setDatabaseRecords(records);
 
-  if (updatedRecord.id && getFirestoreInstance()) {
-    await updatePurchaseRequestInFirestore(updatedRecord.id, {
-      approvalStatus: updatedRecord.approvalStatus,
-      status: updatedRecord.status,
-      approvalBy: updatedRecord.approvalBy,
-      approvalAt: updatedRecord.approvalAt
-    }).catch(() => {});
-
-    await notifyUserOfRequestDecision(updatedRecord, 'approved');
-  }
+    if (updatedRecord.id && getFirestoreInstance()) {
+      // Persist the full record to ensure no fields are lost due to
+      // partial updates or client/server merge ordering.
+      try {
+        await updatePurchaseRequestInFirestore(updatedRecord.id, updatedRecord);
+        await notifyUserOfRequestDecision(updatedRecord, 'approved');
+      } catch (err) {
+        console.warn('Failed to persist full approved record to Firestore:', err);
+      }
+    }
 
   await loadNotifications();
   initRecords();
@@ -3203,28 +3300,31 @@ async function approveRecord(recordId) {
 async function rejectRecord(recordId) {
   if (!confirm('Are you sure you want to reject this record?')) return;
   const records = getDatabaseRecords();
-  const index = records.findIndex(r => r.id === recordId || cleanPrNumber(r.prNumber) === recordId);
-  if (index === -1) return;
-
+  const recordIndex = records.findIndex(r => getRecordIdentifier(r) === recordId);
+  if (recordIndex === -1) {
+    console.warn('Reject action could not find record for id:', recordId, records.map(getRecordIdentifier));
+    return;
+  }
+  const record = records[recordIndex];
+  console.log('Rejecting record (before):', record);
+  
   const updatedRecord = normalizeRecordStatus({
-    ...records[index],
+    ...record,
     approvalStatus: 'rejected',
     status: 'rejected',
     approvalBy: currentUserProfile?.displayName || 'Admin',
-    approvalAt: new Date().toISOString()
+    approvalAt: new Date().toISOString(),
+    lastModified: new Date().toISOString()
   });
+  
+  console.log('Rejecting record (after):', updatedRecord);
 
-  records[index] = updatedRecord;
+  records[recordIndex] = updatedRecord;
   setDatabaseRecords(records);
 
   if (updatedRecord.id && getFirestoreInstance()) {
     try {
-      await updatePurchaseRequestInFirestore(updatedRecord.id, {
-        approvalStatus: updatedRecord.approvalStatus,
-        status: updatedRecord.status,
-        approvalBy: updatedRecord.approvalBy,
-        approvalAt: updatedRecord.approvalAt
-      });
+      await updatePurchaseRequestInFirestore(updatedRecord.id, updatedRecord);
       await notifyUserOfRequestDecision(updatedRecord, 'rejected');
     } catch (error) {
       console.error('Error rejecting request in Firestore:', error);
@@ -3304,7 +3404,7 @@ function applyDashboardFilters() {
 }
 
 function openRecord(recordId, action) {
-  const record = getDatabaseRecords().find(r => r.id === recordId || cleanPrNumber(r.prNumber) === recordId);
+  const record = getDatabaseRecords().find(r => getRecordIdentifier(r) === recordId);
   if (!record) return;
   if (action === 'view') {
     showPreviewModal(record);
@@ -4388,7 +4488,7 @@ function handleRecordAction(event) {
 
 function editRecord(recordId) {
   const records = getDatabaseRecords();
-  const record = records.find(r => r.id === recordId || cleanPrNumber(r.prNumber) === recordId);
+  const record = records.find(r => getRecordIdentifier(r) === recordId);
   if (!record) {
     alert('Record not found!');
     return;
