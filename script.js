@@ -365,10 +365,10 @@ async function loadNotifications() {
   try {
     const queries = [];
     if (currentUserProfile.uid) {
-      queries.push(db.collection('notifications').where('recipientUid', '==', currentUserProfile.uid).orderBy('createdAt', 'desc').limit(100));
+      queries.push(db.collection('notifications').where('recipientUid', '==', currentUserProfile.uid).limit(100));
     }
     if (currentUserProfile.email) {
-      queries.push(db.collection('notifications').where('recipientEmail', '==', String(currentUserProfile.email).toLowerCase()).orderBy('createdAt', 'desc').limit(100));
+      queries.push(db.collection('notifications').where('recipientEmail', '==', String(currentUserProfile.email).toLowerCase()).limit(100));
     }
 
     const notifications = [];
@@ -542,7 +542,14 @@ async function updatePurchaseRequestInFirestore(requestId, updates) {
       }
     };
 
-    await db.collection('purchaseRequests').doc(requestId).update(payload);
+    const docRef = db.collection('purchaseRequests').doc(requestId);
+    const docSnapshot = await docRef.get();
+    if (docSnapshot.exists) {
+      await docRef.update(payload);
+    } else {
+      console.warn('Purchase request document not found, creating document with merge:', requestId);
+      await docRef.set(payload, { merge: true });
+    }
 
     console.log('Purchase request updated:', requestId);
     return true;
@@ -3668,6 +3675,10 @@ function showPreviewModal(record) {
   // If the target is the old table1 template, write the embedded HTML into the new window so no separate file is required.
   if (targetTemplate && targetTemplate.includes('table1.html')) {
     const viewWindow = window.open('', 'PRPreview', 'width=1000,height=800,scrollbars=yes');
+    if (!viewWindow) {
+      alert('Unable to open preview window. Please allow popups for this site and try again.');
+      return;
+    }
     try {
       viewWindow.document.open();
       const previewOffice = record.selectedAreaLabel || getRecordBranch(record) || currentUserProfile?.office || 'PhilHealth Regional Office';
@@ -3697,6 +3708,10 @@ function showPreviewModal(record) {
 
   // Default behavior for other templates
   const viewWindow = window.open(targetTemplate, 'PRPreview', 'width=1000,height=800,scrollbars=yes');
+  if (!viewWindow) {
+    alert('Unable to open preview window. Please allow popups for this site and try again.');
+    return;
+  }
   
   // Wait for the window document to be ready
   let checkCount = 0;
