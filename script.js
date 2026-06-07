@@ -79,6 +79,8 @@ let userAccountsSearch = '';
 let pendingPasswordResetEmail = '';
 let firestoreRecordsCache = [];
 let firestoreRecordsLoaded = false;
+let notificationsCache = [];
+let notificationsLoaded = false;
 const USER_ACCOUNTS_PER_PAGE = 15;
 
 function initializeFirebaseAuth() {
@@ -220,6 +222,11 @@ async function savePurchaseRequestToFirestore(requestData) {
     };
 
     const docRef = await db.collection('purchaseRequests').add(payload);
+    payload.id = docRef.id;
+
+    if (currentUserProfile?.role !== 'admin') {
+      await notifyAdminsOfNewPurchaseRequest(payload);
+    }
 
     console.log('Purchase request saved:', docRef.id);
     return docRef.id;
@@ -228,6 +235,257 @@ async function savePurchaseRequestToFirestore(requestData) {
     alert('Failed to save purchase request: ' + error.message);
     return null;
   }
+}
+
+function formatNotificationTimestamp(timestamp) {
+  if (!timestamp) return '';
+  try {
+    const date = typeof timestamp.toDate === 'function' ? timestamp.toDate() : new Date(timestamp);
+    if (Number.isNaN(date.getTime())) return '';
+    return date.toLocaleString('en-PH', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit'
+    });
+  } catch (error) {
+    return '';
+  }
+}
+
+function escapeHtml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+async function createNotification(notification) {
+  const db = getFirestoreInstance();
+  if (!db) return null;
+
+  try {
+    const payload = {
+      recipientUid: notification.recipientUid || null,
+      recipientEmail: notification.recipientEmail ? String(notification.recipientEmail).toLowerCase() : null,
+      senderUid: notification.senderUid || null,
+      senderName: notification.senderName || '',
+      title: notification.title || '',
+      message: notification.message || '',
+      type: notification.type || 'general',
+      relatedRecordId: notification.relatedRecordId || null,
+      relatedPrNumber: notification.relatedPrNumber || null,
+      isRead: false,
+      createdAt: firebase.firestore.FieldValue.serverTimestamp()
+    };
+    const docRef = await db.collection('notifications').add(payload);
+    return docRef.id;
+  } catch (error) {
+    console.error('Error creating notification:', error);
+    return null;
+  }
+}
+
+async function getAdminUsers() {
+  const db = getFirestoreInstance();
+  if (!db) return [];
+
+  try {
+    const snapshot = await db.collection('users').where('role', '==', 'admin').get();
+    if (!snapshot.empty) {
+      return snapshot.docs.map(doc => ({ uid: doc.id, ...doc.data() }));
+    }
+  } catch (error) {
+    console.warn('Unable to load admin users for notifications:', error);
+  }
+
+  return Object.entries(userRoleMatrix)
+    .filter(([, meta]) => meta.role === 'admin')
+    .map(([email, meta]) => ({ uid: null, email, displayName: meta.displayName }));
+}
+
+async function notifyAdminsOfNewPurchaseRequest(record) {
+  if (!record || !currentAuthUser) return;
+  const admins = await getAdminUsers();
+  if (!admins.length) return;
+
+  const title = 'New purchase request submitted';
+  const message = `${currentUserProfile?.displayName || currentAuthUser.email} submitted a new purchase request${record.prNumber ? ` (${record.prNumber})` : ''}.`;
+
+  await Promise.all(admins.map(admin => createNotification({
+    recipientUid: admin.uid,
+    recipientEmail: admin.email,
+    senderUid: currentAuthUser.uid,
+    senderName: currentUserProfile?.displayName || currentAuthUser.email,
+    title,
+    message,
+    type: 'record_created',
+    relatedRecordId: record.id,
+    relatedPrNumber: record.prNumber
+  })));
+}
+
+async function notifyUserOfRequestDecision(record, action) {
+  if (!record || !record.createdBy) return;
+
+  const recipientUid = record.createdBy.uid || null;
+  const recipientEmail = record.createdBy.email || null;
+  if (!recipientUid && !recipientEmail) return;
+
+  const actionLabel = action === 'approved' ? 'approved' : 'rejected';
+  const title = `Your purchase request was ${actionLabel}`;
+  const message = `${currentUserProfile?.displayName || 'Admin'} ${actionLabel} your purchase request${record.prNumber ? ` (${record.prNumber})` : ''}.`;
+
+  await createNotification({
+    recipientUid,
+    recipientEmail,
+    senderUid: currentAuthUser?.uid || null,
+    senderName: currentUserProfile?.displayName || currentAuthUser?.email || 'Admin',
+    title,
+    message,
+    type: 'record_status_changed',
+    relatedRecordId: record.id,
+    relatedPrNumber: record.prNumber
+  });
+}
+
+async function loadNotifications() {
+  const db = getFirestoreInstance();
+  if (!db || !currentUserProfile) {
+    notificationsCache = [];
+    notificationsLoaded = true;
+    renderNotifications([]);
+    updateNotificationBadge();
+    return;
+  }
+
+  try {
+    const queries = [];
+    if (currentUserProfile.uid) {
+      queries.push(db.collection('notifications').where('recipientUid', '==', currentUserProfile.uid).orderBy('createdAt', 'desc').limit(100));
+    }
+    if (currentUserProfile.email) {
+      queries.push(db.collection('notifications').where('recipientEmail', '==', String(currentUserProfile.email).toLowerCase()).orderBy('createdAt', 'desc').limit(100));
+    }
+
+    const notifications = [];
+    for (const query of queries) {
+      const snapshot = await query.get();
+      snapshot.forEach(doc => notifications.push({ id: doc.id, ...doc.data() }));
+    }
+
+    const uniqueNotifications = [];
+    const seen = new Set();
+    notifications.forEach(notification => {
+      if (!seen.has(notification.id)) {
+        seen.add(notification.id);
+        uniqueNotifications.push(notification);
+      }
+    });
+
+    notificationsCache = uniqueNotifications.sort((a, b) => {
+      const aTime = a.createdAt?.toMillis?.() || new Date(a.createdAt || 0).getTime();
+      const bTime = b.createdAt?.toMillis?.() || new Date(b.createdAt || 0).getTime();
+      return bTime - aTime;
+    });
+    notificationsLoaded = true;
+    renderNotifications(notificationsCache);
+    updateNotificationBadge();
+  } catch (error) {
+    console.error('Error loading notifications:', error);
+    notificationsCache = [];
+    renderNotifications([]);
+    updateNotificationBadge();
+  }
+}
+
+function renderNotifications(notifications) {
+  const list = document.getElementById('notificationsList');
+  if (!list) return;
+
+  if (!Array.isArray(notifications) || notifications.length === 0) {
+    list.innerHTML = '<div class="empty-state">No notifications yet.</div>';
+    return;
+  }
+
+  list.innerHTML = notifications.map(notification => {
+    const statusLabel = notification.isRead ? 'Read' : 'Unread';
+    return `
+      <div class="notification-card ${notification.isRead ? 'read' : 'unread'}">
+        <div class="notification-card-top">
+          <div>
+            <div class="notification-title">${escapeHtml(notification.title)}</div>
+            <div class="notification-message">${escapeHtml(notification.message)}</div>
+          </div>
+          <button type="button" class="button button--secondary notification-action-btn" onclick="markNotificationAsRead('${notification.id}')">${notification.isRead ? 'Read' : 'Mark read'}</button>
+        </div>
+        <div class="notification-meta">
+          <span>${escapeHtml(statusLabel)}</span>
+          <span>${escapeHtml(formatNotificationTimestamp(notification.createdAt))}</span>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function updateNotificationBadge() {
+  const badge = document.getElementById('notificationBadge');
+  const notificationLink = document.querySelector('.sidebar-link[href="#notifications"]');
+  if (!badge) return;
+  const unreadCount = notificationsCache.filter(notification => !notification.isRead).length;
+  if (notificationLink) {
+    if (unreadCount > 0) {
+      notificationLink.classList.add('has-unread');
+    } else {
+      notificationLink.classList.remove('has-unread');
+    }
+  }
+  if (unreadCount > 0) {
+    badge.textContent = String(unreadCount);
+    badge.classList.remove('hidden');
+  } else {
+    badge.textContent = '';
+    badge.classList.add('hidden');
+  }
+}
+
+async function markNotificationAsRead(notificationId) {
+  if (!notificationId || !getFirestoreInstance()) return;
+  const db = getFirestoreInstance();
+
+  try {
+    await db.collection('notifications').doc(notificationId).update({
+      isRead: true,
+      readAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+  } catch (error) {
+    console.error('Error marking notification as read:', error);
+  }
+
+  await loadNotifications();
+}
+
+async function markAllNotificationsRead() {
+  if (!getFirestoreInstance() || !notificationsCache.length) return;
+  const db = getFirestoreInstance();
+
+  try {
+    const batch = db.batch();
+    notificationsCache.forEach(notification => {
+      if (!notification.isRead) {
+        const ref = db.collection('notifications').doc(notification.id);
+        batch.update(ref, { isRead: true, readAt: firebase.firestore.FieldValue.serverTimestamp() });
+      }
+    });
+    await batch.commit();
+  } catch (error) {
+    console.error('Error marking all notifications read:', error);
+  }
+
+  await loadNotifications();
 }
 
 /**
@@ -313,7 +571,10 @@ async function getPurchaseRequestsForUser() {
 
     const snapshot = await query.get();
     const requests = [];
-    snapshot.forEach(doc => requests.push({ id: doc.id, ...doc.data() }));
+    snapshot.forEach(doc => {
+      const record = { id: doc.id, ...doc.data() };
+      if (isVisibleRecord(record)) requests.push(record);
+    });
 
     // Order results client-side by `createdAt` (if present) so Firestore
     // doesn't require a composite index for where+orderBy.
@@ -348,7 +609,10 @@ function startPurchaseRequestsListener() {
 
   purchaseRequestsUnsubscribe = query.onSnapshot(snapshot => {
     const requests = [];
-    snapshot.forEach(doc => requests.push({ id: doc.id, ...doc.data() }));
+    snapshot.forEach(doc => {
+      const record = { id: doc.id, ...doc.data() };
+      if (isVisibleRecord(record)) requests.push(record);
+    });
     // client-side sort by createdAt desc
     requests.sort((a, b) => {
       const ta = a.createdAt && a.createdAt.toDate ? a.createdAt.toDate().getTime() : (a.createdAt ? new Date(a.createdAt).getTime() : 0);
@@ -513,7 +777,7 @@ async function handleAuthStateChanged(user) {
     firestoreRecordsLoaded = false;
   }
   
-  applyAuthState();
+  await applyAuthState();
 }
 
 function signInWithFirebase() {
@@ -961,7 +1225,7 @@ function updateAuthUI() {
   }
 }
 
-function applyAuthState() {
+async function applyAuthState() {
   updateAuthUI();
   if (!currentUserProfile) {
     showLoginOverlay();
@@ -972,6 +1236,7 @@ function applyAuthState() {
   updateHeaderImage();
   updateSectionDefaultsForLhio();
   updateRecordsTableSchema();
+  await loadNotifications();
   routeApp(window.location.hash || '#new');
 }
 
@@ -1679,6 +1944,9 @@ document.addEventListener('DOMContentLoaded', () => {
   const recordsYearFilter = document.getElementById('recordsYearFilter');
   if (recordsYearFilter) recordsYearFilter.addEventListener('change', filterRecords);
 
+  const markAllNotificationsReadBtn = document.getElementById('markAllNotificationsReadBtn');
+  if (markAllNotificationsReadBtn) markAllNotificationsReadBtn.addEventListener('click', markAllNotificationsRead);
+
   const archiveSearchBox = document.getElementById('archiveSearchBox');
   if (archiveSearchBox) archiveSearchBox.addEventListener('input', filterArchive);
 
@@ -1687,6 +1955,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const archiveYearFilter = document.getElementById('archiveYearFilter');
   if (archiveYearFilter) archiveYearFilter.addEventListener('change', filterArchive);
+
+  const deleteAllArchivedBtn = document.getElementById('deleteAllArchivedBtn');
+  if (deleteAllArchivedBtn) deleteAllArchivedBtn.addEventListener('click', deleteAllArchivedRecords);
 
   const createUserBtn = document.getElementById('createUserBtn');
   if (createUserBtn) createUserBtn.addEventListener('click', createOfficerAccount);
@@ -1985,9 +2256,17 @@ async function saveForm() {
   await persistFormData(formData);
 }
 
+function isVisibleRecord(record) {
+  if (!record || typeof record !== 'object') return false;
+  const status = String(record.status || record.approvalStatus || '').toLowerCase().trim();
+  return status !== 'rejected' && status !== 'deleted';
+}
+
 function getDatabaseRecords() {
   if (currentAuthUser && firestoreRecordsLoaded) {
-    return firestoreRecordsCache.map(record => ({ ...record }));
+    return firestoreRecordsCache
+      .filter(isVisibleRecord)
+      .map(record => ({ ...record }));
   }
 
   const raw = JSON.parse(localStorage.getItem('purchaseRequestDatabase') || '[]');
@@ -2191,12 +2470,13 @@ function routeApp(hash) {
 function setActiveView(view) {
   const newSection = document.getElementById('newRequestSection');
   const dashboardSection = document.getElementById('dashboardSection');
+  const notificationsSection = document.getElementById('notificationsSection');
   const recordsSection = document.getElementById('recordsSection');
   const archiveSection = document.getElementById('archiveSection');
   const usersSection = document.getElementById('usersSection');
   const helpSection = document.getElementById('helpSection');
 
-  const sections = [newSection, dashboardSection, recordsSection, archiveSection, usersSection, helpSection];
+  const sections = [newSection, dashboardSection, notificationsSection, recordsSection, archiveSection, usersSection, helpSection];
   sections.forEach(section => {
     if (!section) return;
     section.classList.add('hidden');
@@ -2210,6 +2490,9 @@ function setActiveView(view) {
   if (activeView === 'dashboard') {
     dashboardSection?.classList.remove('hidden');
     initDashboard();
+  } else if (activeView === 'notifications') {
+    notificationsSection?.classList.remove('hidden');
+    initNotifications();
   } else if (activeView === 'records') {
     recordsSection?.classList.remove('hidden');
     initRecords();
@@ -2240,6 +2523,10 @@ function initDashboard() {
   updateDashboardYearFilter(allRecords);
   updateSummaryCards(allRecords);
   applyDashboardFilters();
+}
+
+function initNotifications() {
+  loadNotifications();
 }
 
 function initRecords() {
@@ -2534,6 +2821,38 @@ function permanentlyDeleteArchived(recordId) {
   initArchive();
 }
 
+async function deleteAllArchivedRecords() {
+  const archived = getArchiveRecords();
+  if (!archived.length) {
+    alert('There are no archived records to delete.');
+    return;
+  }
+
+  if (!confirm('⚠️ Delete all archived records? This will permanently remove all archived forms and cannot be undone.')) {
+    return;
+  }
+
+  const db = getFirestoreInstance();
+  if (db) {
+    try {
+      const batch = db.batch();
+      archived.forEach(record => {
+        if (record.id) {
+          batch.delete(db.collection('purchaseRequests').doc(record.id));
+        }
+      });
+      await batch.commit();
+    } catch (error) {
+      console.warn('Failed to delete archived records from Firestore:', error);
+    }
+  }
+
+  localStorage.setItem('purchaseRequestArchive', JSON.stringify([]));
+  initArchive();
+  applyDashboardFilters();
+  alert('All archived records have been deleted.');
+}
+
 function updateSummaryCards(records = []) {
   const totalValue = records.reduce((sum, record) => {
     if (String(record.approvalStatus || '').toLowerCase() !== 'approved') return sum;
@@ -2689,16 +3008,28 @@ function renderSavedRecordsTable(records) {
   }).join('');
 }
 
-function deleteRecord(recordId) {
+async function deleteRecord(recordId) {
   if (!confirm('Are you sure you want to archive this record? It can be restored within 30 days.')) return;
   const records = getDatabaseRecords();
   const index = records.findIndex(r => r.id === recordId || cleanPrNumber(r.prNumber) === recordId);
   if (index === -1) return;
   const [record] = records.splice(index, 1);
   record.archivedAt = new Date().toISOString();
+  record.status = 'deleted';
+  record.approvalStatus = 'deleted';
+  record.deletedBy = currentUserProfile?.displayName || currentAuthUser?.email || 'Admin';
+  record.deletedAt = new Date().toISOString();
   const archived = JSON.parse(localStorage.getItem('purchaseRequestArchive') || '[]');
   archived.push(record);
   localStorage.setItem('purchaseRequestArchive', JSON.stringify(archived));
+  if (record.id && getFirestoreInstance()) {
+    await updatePurchaseRequestInFirestore(record.id, {
+      status: 'deleted',
+      approvalStatus: 'deleted',
+      deletedBy: record.deletedBy,
+      deletedAt: record.deletedAt
+    }).catch(error => console.warn('Failed to persist archive/delete status to Firestore:', error));
+  }
   setDatabaseRecords(records);
   initRecords();
   initArchive();
@@ -2706,29 +3037,69 @@ function deleteRecord(recordId) {
   alert('Record archived successfully! It can be restored within 30 days from the Archive menu.');
 }
 
-function approveRecord(recordId) {
+async function approveRecord(recordId) {
   if (!confirm('Are you sure you want to approve this record?')) return;
   const records = getDatabaseRecords();
   const index = records.findIndex(r => r.id === recordId || cleanPrNumber(r.prNumber) === recordId);
   if (index === -1) return;
-  records[index].approvalStatus = 'approved';
-  records[index].approvalBy = currentUserProfile?.displayName || 'Admin';
-  records[index].approvalAt = new Date().toISOString();
+
+  const updatedRecord = {
+    ...records[index],
+    approvalStatus: 'approved',
+    status: 'approved',
+    approvalBy: currentUserProfile?.displayName || 'Admin',
+    approvalAt: new Date().toISOString()
+  };
+
+  records[index] = updatedRecord;
   setDatabaseRecords(records);
+
+  if (updatedRecord.id && getFirestoreInstance()) {
+    await updatePurchaseRequestInFirestore(updatedRecord.id, {
+      approvalStatus: updatedRecord.approvalStatus,
+      status: updatedRecord.status,
+      approvalBy: updatedRecord.approvalBy,
+      approvalAt: updatedRecord.approvalAt
+    }).catch(() => {});
+
+    await notifyUserOfRequestDecision(updatedRecord, 'approved');
+  }
+
+  await loadNotifications();
   initRecords();
   applyDashboardFilters();
   alert('Record approved successfully. Total purchase value is updated for approved requests.');
 }
 
-function rejectRecord(recordId) {
+async function rejectRecord(recordId) {
   if (!confirm('Are you sure you want to reject this record?')) return;
   const records = getDatabaseRecords();
   const index = records.findIndex(r => r.id === recordId || cleanPrNumber(r.prNumber) === recordId);
   if (index === -1) return;
-  records[index].approvalStatus = 'rejected';
-  records[index].approvalBy = currentUserProfile?.displayName || 'Admin';
-  records[index].approvalAt = new Date().toISOString();
+
+  const updatedRecord = {
+    ...records[index],
+    approvalStatus: 'rejected',
+    status: 'rejected',
+    approvalBy: currentUserProfile?.displayName || 'Admin',
+    approvalAt: new Date().toISOString()
+  };
+
+  records[index] = updatedRecord;
   setDatabaseRecords(records);
+
+  if (updatedRecord.id && getFirestoreInstance()) {
+    await updatePurchaseRequestInFirestore(updatedRecord.id, {
+      approvalStatus: updatedRecord.approvalStatus,
+      status: updatedRecord.status,
+      approvalBy: updatedRecord.approvalBy,
+      approvalAt: updatedRecord.approvalAt
+    }).catch(() => {});
+
+    await notifyUserOfRequestDecision(updatedRecord, 'rejected');
+  }
+
+  await loadNotifications();
   initRecords();
   applyDashboardFilters();
   alert('Record rejected successfully. It will no longer be counted as approved.');

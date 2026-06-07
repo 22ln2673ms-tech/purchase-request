@@ -108,6 +108,7 @@
     <div class="sidebar-nav">
       <a href="#dashboard" class="sidebar-link">Dashboard</a>
       <a href="#records" class="sidebar-link">Records</a>
+      <a href="#notifications" class="sidebar-link">Notifications <span id="notificationBadge" class="notification-badge hidden"></span></a>
       <a href="#archive" class="sidebar-link">Archive</a>
       <a href="#new" class="sidebar-link active">New Request</a>
       <a href="#users" class="sidebar-link admin-only hidden">User Management</a>
@@ -419,6 +420,21 @@
     </div>
   </section>
 
+  <section id="notificationsSection" class="container hidden">
+    <div class="section-card">
+      <div class="section-header">
+        <div>
+          <h2>Notifications</h2>
+          <p>View your latest messages and system alerts here.</p>
+        </div>
+        <button id="markAllNotificationsReadBtn" class="button button--secondary">Mark all as read</button>
+      </div>
+      <div class="notifications-list" id="notificationsList">
+        <div class="empty-state">Loading notifications...</div>
+      </div>
+    </div>
+  </section>
+
   <section id="recordsSection" class="container hidden">
     <div class="section-card">
       <div class="section-header">
@@ -478,6 +494,7 @@
           <h2>Archived Records</h2>
           <p>Restore archived purchase requests or review recently archived items.</p>
         </div>
+        <button id="deleteAllArchivedBtn" class="button button--danger admin-only hidden">Delete all</button>
       </div>
       <div class="report-controls">
         <input id="archiveSearchBox" type="text" placeholder="Search by branch or item" />
