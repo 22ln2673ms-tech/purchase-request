@@ -332,8 +332,12 @@ async function notifyUserOfRequestDecision(record, action) {
   if (!record || !record.createdBy) return;
 
   const recipientUid = record.createdBy.uid || null;
-  const recipientEmail = record.createdBy.email || null;
+  const recipientEmail = record.createdBy.email ? String(record.createdBy.email).toLowerCase() : null;
   if (!recipientUid && !recipientEmail) return;
+
+  const currentUserEmail = currentAuthUser?.email ? String(currentAuthUser.email).toLowerCase() : null;
+  if (currentUserProfile?.uid && recipientUid === currentUserProfile.uid) return;
+  if (currentUserEmail && recipientEmail === currentUserEmail) return;
 
   const actionLabel = action === 'approved' ? 'approved' : 'rejected';
   const title = `Your purchase request was ${actionLabel}`;
@@ -2265,8 +2269,9 @@ async function saveForm() {
 
 function isVisibleRecord(record) {
   if (!record || typeof record !== 'object') return false;
-  const status = String(record.status || record.approvalStatus || '').toLowerCase().trim();
-  return status !== 'rejected' && status !== 'deleted';
+  const status = String(record.approvalStatus || record.status || '').toLowerCase().trim();
+  // Keep rejected records visible on the records page so admins can archive them.
+  return status !== 'deleted';
 }
 
 function getDatabaseRecords() {
@@ -2285,6 +2290,12 @@ function getDatabaseRecords() {
     if (!record.id) {
       record.id = record.timestamp || generateRecordId();
       updated = true;
+    }
+    if (!record.approvalStatus && record.status) {
+      record.approvalStatus = String(record.status).toLowerCase().trim();
+    }
+    if (!record.status && record.approvalStatus) {
+      record.status = String(record.approvalStatus).toLowerCase().trim();
     }
     return record;
   });
@@ -2622,7 +2633,7 @@ function renderRecordsTable(records) {
     const itemTitle = (record.items && record.items[0]?.itemDescription) || record.purpose || '-';
     const dateText = formatDateToLong(record.prDate) || record.prDate || '-';
     const controlNumber = record.controlNumber || 'TBD';
-    const status = String(record.approvalStatus || 'pending').toLowerCase();
+    const status = String(record.approvalStatus || record.status || 'pending').toLowerCase().trim();
     const statusLabel = status === 'approved' ? 'Approved' : status === 'rejected' ? 'Rejected' : 'Pending';
     const statusColor = status === 'approved' ? '#0b7c47' : status === 'rejected' ? '#d63031' : '#f39c12';
     let actions = `<button class="record-action-btn" onclick="openRecord('${recordId}', 'view')">View</button>`;
@@ -2746,7 +2757,7 @@ function renderArchiveTable(records) {
     const branch = getRecordBranch(record) || '-';
     const archivedAt = record.archivedAt ? new Date(record.archivedAt).toLocaleDateString('en-PH') : '-';
     const itemSize = formatRecordSize(record);
-    const status = String(record.approvalStatus || 'pending').toLowerCase();
+    const status = String(record.approvalStatus || record.status || 'pending').toLowerCase().trim();
     const statusLabel = status === 'approved' ? 'Approved' : status === 'rejected' ? 'Rejected' : 'Pending';
     const statusColor = status === 'approved' ? '#0b7c47' : status === 'rejected' ? '#d63031' : '#f39c12';
     return `
