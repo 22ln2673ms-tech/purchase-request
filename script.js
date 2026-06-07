@@ -3096,14 +3096,17 @@ async function rejectRecord(recordId) {
   setDatabaseRecords(records);
 
   if (updatedRecord.id && getFirestoreInstance()) {
-    await updatePurchaseRequestInFirestore(updatedRecord.id, {
-      approvalStatus: updatedRecord.approvalStatus,
-      status: updatedRecord.status,
-      approvalBy: updatedRecord.approvalBy,
-      approvalAt: updatedRecord.approvalAt
-    }).catch(() => {});
-
-    await notifyUserOfRequestDecision(updatedRecord, 'rejected');
+    try {
+      await updatePurchaseRequestInFirestore(updatedRecord.id, {
+        approvalStatus: updatedRecord.approvalStatus,
+        status: updatedRecord.status,
+        approvalBy: updatedRecord.approvalBy,
+        approvalAt: updatedRecord.approvalAt
+      });
+      await notifyUserOfRequestDecision(updatedRecord, 'rejected');
+    } catch (error) {
+      console.error('Error rejecting request in Firestore:', error);
+    }
   }
 
   await loadNotifications();
