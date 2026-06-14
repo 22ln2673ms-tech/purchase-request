@@ -72,17 +72,10 @@ let currentAuthUser = null;
 let currentUserProfile = null;
 let firebaseAuth = null;
 let firestoreDb = null;
-let purchaseRequestsUnsubscribe = null;
 let userAccountsCache = [];
 let userAccountsPage = 1;
 let userAccountsSearch = '';
 let pendingPasswordResetEmail = '';
-let firestoreRecordsCache = [];
-let firestoreRecordsLoaded = false;
-let archiveRecordsCache = [];
-let archiveRecordsLoaded = false;
-let notificationsCache = [];
-let notificationsLoaded = false;
 const USER_ACCOUNTS_PER_PAGE = 15;
 
 function initializeFirebaseAuth() {
@@ -97,13 +90,7 @@ function initializeFirebaseAuth() {
   }
 
   firebaseAuth = firebase.auth();
-  // initialize firestore correctly (fix typo)
-  try {
-    firestoreDb = firebase.firestore();
-  } catch (e) {
-    console.warn('Unable to initialize Firestore instance:', e);
-    firestoreDb = null;
-  }
+  firestoreDb = firebase.firestore();
   firebaseAuth.onAuthStateChanged(handleAuthStateChanged);
 }
 
@@ -200,6 +187,7 @@ async function savePurchaseRequestToFirestore(requestData) {
     console.error('No authenticated user');
     return null;
   }
+
   const db = getFirestoreInstance();
   if (!db) {
     console.error('Firestore not available');
@@ -207,10 +195,8 @@ async function savePurchaseRequestToFirestore(requestData) {
   }
 
   try {
-    // sanitize requestData before sending to Firestore
-    const clean = cleanForFirestore(requestData || {});
-    const payload = {
-      ...clean,
+    const docRef = await db.collection('purchaseRequests').add({
+      ...requestData,
       createdBy: {
         uid: currentAuthUser.uid,
         email: currentAuthUser.email,
@@ -220,15 +206,8 @@ async function savePurchaseRequestToFirestore(requestData) {
       },
       createdAt: firebase.firestore.FieldValue.serverTimestamp(),
       updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
-      status: clean.status || requestData.status || requestData.approvalStatus || 'pending'
-    };
-
-    const docRef = await db.collection('purchaseRequests').add(payload);
-    payload.id = docRef.id;
-
-    if (currentUserProfile?.role !== 'admin') {
-      await notifyAdminsOfNewPurchaseRequest(payload);
-    }
+      status: requestData.status || 'draft'
+    });
 
     console.log('Purchase request saved:', docRef.id);
     return docRef.id;
@@ -239,317 +218,9 @@ async function savePurchaseRequestToFirestore(requestData) {
   }
 }
 
-function formatNotificationTimestamp(timestamp) {
-  if (!timestamp) return '';
-  try {
-    const date = typeof timestamp.toDate === 'function' ? timestamp.toDate() : new Date(timestamp);
-    if (Number.isNaN(date.getTime())) return '';
-    return date.toLocaleString('en-PH', {
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric',
-      hour: 'numeric',
-      minute: '2-digit'
-    });
-  } catch (error) {
-    return '';
-  }
-}
-
-function escapeHtml(value) {
-  return String(value || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
-async function createNotification(notification) {
-  const db = getFirestoreInstance();
-  if (!db) return null;
-
-  try {
-    const payload = {
-      recipientUid: notification.recipientUid || null,
-      recipientEmail: notification.recipientEmail ? String(notification.recipientEmail).toLowerCase() : null,
-      senderUid: notification.senderUid || null,
-      senderName: notification.senderName || '',
-      title: notification.title || '',
-      message: notification.message || '',
-      type: notification.type || 'general',
-      relatedRecordId: notification.relatedRecordId || null,
-      relatedPrNumber: notification.relatedPrNumber || null,
-      isRead: false,
-      createdAt: firebase.firestore.FieldValue.serverTimestamp()
-    };
-    const docRef = await db.collection('notifications').add(payload);
-    return docRef.id;
-  } catch (error) {
-    console.error('Error creating notification:', error);
-    return null;
-  }
-}
-
-async function getAdminUsers() {
-  const db = getFirestoreInstance();
-  if (!db) return [];
-
-  try {
-    const snapshot = await db.collection('users').where('role', '==', 'admin').get();
-    if (!snapshot.empty) {
-      return snapshot.docs.map(doc => ({ uid: doc.id, ...doc.data() }));
-    }
-  } catch (error) {
-    console.warn('Unable to load admin users for notifications:', error);
-  }
-
-  return Object.entries(userRoleMatrix)
-    .filter(([, meta]) => meta.role === 'admin')
-    .map(([email, meta]) => ({ uid: null, email, displayName: meta.displayName }));
-}
-
-async function notifyAdminsOfNewPurchaseRequest(record) {
-  if (!record || !currentAuthUser) return;
-  const admins = await getAdminUsers();
-  if (!admins.length) return;
-
-  const title = 'New purchase request submitted';
-  const message = `${currentUserProfile?.displayName || currentAuthUser.email} submitted a new purchase request${record.prNumber ? ` (${record.prNumber})` : ''}.`;
-
-  await Promise.all(admins.map(admin => createNotification({
-    recipientUid: admin.uid,
-    recipientEmail: admin.email,
-    senderUid: currentAuthUser.uid,
-    senderName: currentUserProfile?.displayName || currentAuthUser.email,
-    title,
-    message,
-    type: 'record_created',
-    relatedRecordId: record.id,
-    relatedPrNumber: record.prNumber
-  })));
-}
-
-async function notifyUserOfRequestDecision(record, action) {
-  if (!record || !record.createdBy) return;
-
-  const recipientUid = record.createdBy.uid || null;
-  const recipientEmail = record.createdBy.email ? String(record.createdBy.email).toLowerCase() : null;
-  if (!recipientUid && !recipientEmail) return;
-
-  const currentUserEmail = currentAuthUser?.email ? String(currentAuthUser.email).toLowerCase() : null;
-  if (currentUserProfile?.uid && recipientUid === currentUserProfile.uid) return;
-  if (currentUserEmail && recipientEmail === currentUserEmail) return;
-
-  const actionLabel = action === 'approved' ? 'approved' : 'rejected';
-  const title = `Your purchase request was ${actionLabel}`;
-  const message = `${currentUserProfile?.displayName || 'Admin'} ${actionLabel} your purchase request${record.prNumber ? ` (${record.prNumber})` : ''}.`;
-
-  await createNotification({
-    recipientUid,
-    recipientEmail,
-    senderUid: currentAuthUser?.uid || null,
-    senderName: currentUserProfile?.displayName || currentAuthUser?.email || 'Admin',
-    title,
-    message,
-    type: 'record_status_changed',
-    relatedRecordId: record.id,
-    relatedPrNumber: record.prNumber
-  });
-}
-
-async function loadNotifications() {
-  const db = getFirestoreInstance();
-  if (!db || !currentUserProfile) {
-    notificationsCache = [];
-    notificationsLoaded = true;
-    renderNotifications([]);
-    updateNotificationBadge();
-    return;
-  }
-
-  try {
-    const queries = [];
-    if (currentUserProfile.uid) {
-      queries.push(db.collection('notifications').where('recipientUid', '==', currentUserProfile.uid).limit(100));
-    }
-    if (currentUserProfile.email) {
-      queries.push(db.collection('notifications').where('recipientEmail', '==', String(currentUserProfile.email).toLowerCase()).limit(100));
-    }
-
-    const notifications = [];
-    for (const query of queries) {
-      const snapshot = await query.get();
-      snapshot.forEach(doc => notifications.push({ id: doc.id, ...doc.data() }));
-    }
-
-    const uniqueNotifications = [];
-    const seen = new Set();
-    notifications.forEach(notification => {
-      if (!seen.has(notification.id)) {
-        seen.add(notification.id);
-        uniqueNotifications.push(notification);
-      }
-    });
-
-    notificationsCache = uniqueNotifications.sort((a, b) => {
-      const aTime = a.createdAt?.toMillis?.() || new Date(a.createdAt || 0).getTime();
-      const bTime = b.createdAt?.toMillis?.() || new Date(b.createdAt || 0).getTime();
-      return bTime - aTime;
-    });
-    notificationsLoaded = true;
-    renderNotifications(notificationsCache);
-    updateNotificationBadge();
-  } catch (error) {
-    console.error('Error loading notifications:', error);
-    notificationsCache = [];
-    renderNotifications([]);
-    updateNotificationBadge();
-  }
-}
-
-function renderNotifications(notifications) {
-  const list = document.getElementById('notificationsList');
-  if (!list) return;
-
-  if (!Array.isArray(notifications) || notifications.length === 0) {
-    list.innerHTML = '<div class="empty-state">No notifications yet.</div>';
-    return;
-  }
-
-  list.innerHTML = notifications.map(notification => {
-    const statusLabel = notification.isRead ? 'Read' : 'Unread';
-    return `
-      <div class="notification-card ${notification.isRead ? 'read' : 'unread'}">
-        <div class="notification-card-top">
-          <div>
-            <div class="notification-title">${escapeHtml(notification.title)}</div>
-            <div class="notification-message">${escapeHtml(notification.message)}</div>
-          </div>
-          <button type="button" class="button button--secondary notification-action-btn" onclick="markNotificationAsRead('${notification.id}')">${notification.isRead ? 'Read' : 'Mark read'}</button>
-        </div>
-        <div class="notification-meta">
-          <span>${escapeHtml(statusLabel)}</span>
-          <span>${escapeHtml(formatNotificationTimestamp(notification.createdAt))}</span>
-        </div>
-      </div>
-    `;
-  }).join('');
-}
-
-function updateNotificationBadge() {
-  const badge = document.getElementById('notificationBadge');
-  const notificationLink = document.querySelector('.sidebar-link[href="#notifications"]');
-  if (!badge) return;
-  const unreadCount = notificationsCache.filter(notification => !notification.isRead).length;
-  if (notificationLink) {
-    if (unreadCount > 0) {
-      notificationLink.classList.add('has-unread');
-    } else {
-      notificationLink.classList.remove('has-unread');
-    }
-  }
-  if (unreadCount > 0) {
-    badge.textContent = String(unreadCount);
-    badge.classList.remove('hidden');
-  } else {
-    badge.textContent = '';
-    badge.classList.add('hidden');
-  }
-}
-
-async function markNotificationAsRead(notificationId) {
-  if (!notificationId || !getFirestoreInstance()) return;
-  const db = getFirestoreInstance();
-
-  try {
-    await db.collection('notifications').doc(notificationId).update({
-      isRead: true,
-      readAt: firebase.firestore.FieldValue.serverTimestamp()
-    });
-  } catch (error) {
-    console.error('Error marking notification as read:', error);
-  }
-
-  await loadNotifications();
-}
-
-async function markAllNotificationsRead() {
-  if (!getFirestoreInstance() || !notificationsCache.length) return;
-  const db = getFirestoreInstance();
-
-  try {
-    const batch = db.batch();
-    notificationsCache.forEach(notification => {
-      if (!notification.isRead) {
-        const ref = db.collection('notifications').doc(notification.id);
-        batch.update(ref, { isRead: true, readAt: firebase.firestore.FieldValue.serverTimestamp() });
-      }
-    });
-    await batch.commit();
-  } catch (error) {
-    console.error('Error marking all notifications read:', error);
-  }
-
-  await loadNotifications();
-}
-
-async function deleteAllNotifications() {
-  if (!getFirestoreInstance() || !notificationsCache.length) return;
-  if (!confirm('⚠️ Delete all notifications?\n\nThis will permanently remove all notifications visible to you and cannot be undone.')) return;
-
-  const db = getFirestoreInstance();
-
-  try {
-    const batch = db.batch();
-    notificationsCache.forEach(notification => {
-      if (notification.id) {
-        const ref = db.collection('notifications').doc(notification.id);
-        batch.delete(ref);
-      }
-    });
-    await batch.commit();
-  } catch (error) {
-    console.error('Error deleting all notifications:', error);
-    alert('Failed to delete notifications. Check the console for details.');
-  }
-
-  await loadNotifications();
-}
-
 /**
  * Updates an existing purchase request in Firestore
  */
-/**
- * Clean an object for Firestore by removing undefined values and
- * internal metadata keys (properties that start with __).
- */
-function cleanForFirestore(obj) {
-  if (obj === null || obj === undefined) return obj;
-  if (Array.isArray(obj)) return obj.map(v => cleanForFirestore(v));
-  if (typeof obj !== 'object') return obj;
-
-  const out = {};
-  Object.entries(obj).forEach(([k, v]) => {
-    if (k && k.startsWith('__')) return; // skip internal metadata
-    if (v === undefined) return; // skip undefined
-    if (v === null) {
-      out[k] = null;
-      return;
-    }
-    if (Array.isArray(v)) {
-      out[k] = v.map(item => cleanForFirestore(item));
-      return;
-    }
-    if (typeof v === 'object') {
-      out[k] = cleanForFirestore(v);
-      return;
-    }
-    out[k] = v;
-  });
-  return out;
-}
-
 async function updatePurchaseRequestInFirestore(requestId, updates) {
   if (!currentAuthUser) {
     console.error('No authenticated user');
@@ -560,22 +231,15 @@ async function updatePurchaseRequestInFirestore(requestId, updates) {
   if (!db) return false;
 
   try {
-    const clean = cleanForFirestore(updates || {});
-    const payload = {
-      ...clean,
+    await db.collection('purchaseRequests').doc(requestId).update({
+      ...updates,
       updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
       updatedBy: {
         uid: currentAuthUser.uid,
         email: currentAuthUser.email,
         name: currentUserProfile?.displayName
       }
-    };
-
-    const docRef = db.collection('purchaseRequests').doc(requestId);
-      // Use set with merge to ensure we don't accidentally overwrite fields
-      // when applying partial updates (safer than update in environments
-      // where network/proxy may interfere with update operations).
-      await docRef.set(payload, { merge: true });
+    });
 
     console.log('Purchase request updated:', requestId);
     return true;
@@ -595,114 +259,30 @@ async function getPurchaseRequestsForUser() {
   if (!db || !currentAuthUser) return [];
 
   try {
-    // Build a simple query: filter by office for standard users but do not
-    // apply server-side ordering to avoid requiring composite indexes.
     let query = db.collection('purchaseRequests');
+
+    // Standard users only see requests from their office
     if (isStandardUser()) {
       query = query.where('createdBy.office', '==', currentUserProfile.office);
     }
 
+    // Order by most recent first
+    query = query.orderBy('createdAt', 'desc');
+
     const snapshot = await query.get();
     const requests = [];
+    
     snapshot.forEach(doc => {
-      const record = { id: doc.id, ...doc.data() };
-      if (isVisibleRecord(record)) requests.push(record);
-    });
-
-    // Order results client-side by `createdAt` (if present) so Firestore
-    // doesn't require a composite index for where+orderBy.
-    requests.sort((a, b) => {
-      const ta = a.createdAt && a.createdAt.toDate ? a.createdAt.toDate().getTime() : (a.createdAt ? new Date(a.createdAt).getTime() : 0);
-      const tb = b.createdAt && b.createdAt.toDate ? b.createdAt.toDate().getTime() : (b.createdAt ? new Date(b.createdAt).getTime() : 0);
-      return tb - ta;
+      requests.push({
+        id: doc.id,
+        ...doc.data()
+      });
     });
 
     return requests;
   } catch (error) {
     console.error('Error fetching purchase requests:', error);
     return [];
-  }
-}
-
-/**
- * Start a realtime listener for purchaseRequests. Admins listen for all
- * requests; standard users listen for requests matching their office.
- * Updates `firestoreRecordsCache` and UI on changes.
- */
-function startPurchaseRequestsListener() {
-  const db = getFirestoreInstance();
-  if (!db || !currentAuthUser) return;
-  // Stop existing listener if any
-  stopPurchaseRequestsListener();
-
-  let query = db.collection('purchaseRequests');
-  if (isStandardUser()) {
-    query = query.where('createdBy.office', '==', currentUserProfile.office);
-  }
-
-  purchaseRequestsUnsubscribe = query.onSnapshot(snapshot => {
-    const requests = [];
-    snapshot.forEach(doc => {
-      const record = { id: doc.id, ...doc.data() };
-      if (isVisibleRecord(record)) requests.push(record);
-    });
-
-    // Merge server snapshot with localStorage records so local-only changes
-    // (e.g., archived/deleted markers) are not clobbered by an older server
-    // snapshot. Read local storage records and include them in the merge.
-    let localRaw = [];
-    try { localRaw = JSON.parse(localStorage.getItem('purchaseRequestDatabase') || '[]'); } catch (e) { localRaw = []; }
-    const localRecords = Array.isArray(localRaw) ? localRaw.map(r => normalizeRecordStatus({
-      ...r,
-      prNumber: (r.prNumber ? String(r.prNumber).replace(/^AUTO-/, '') : r.prNumber)
-    })) : [];
-
-    // Combine local + server and dedupe preferring newest lastModified/timestamp
-    const combined = [...localRecords, ...requests];
-    // client-side sort by createdAt desc after dedupe
-    const deduped = dedupeRecords(combined);
-    deduped.sort((a, b) => {
-      const ta = a.createdAt && a.createdAt.toDate ? a.createdAt.toDate().getTime() : (a.createdAt ? new Date(a.createdAt).getTime() : 0);
-      const tb = b.createdAt && b.createdAt.toDate ? b.createdAt.toDate().getTime() : (b.createdAt ? new Date(b.createdAt).getTime() : 0);
-      return tb - ta;
-    });
-    firestoreRecordsCache = deduped.map(r => ({ ...r }));
-    firestoreRecordsLoaded = true;
-    setDatabaseRecords(firestoreRecordsCache);
-    // refresh UI
-    updateSummaryCards(getDatabaseRecords());
-    renderRecordsTable(getDatabaseRecords());
-  }, error => {
-    console.error('Realtime listener error:', error);
-  });
-}
-
-function stopPurchaseRequestsListener() {
-  if (purchaseRequestsUnsubscribe) {
-    try { purchaseRequestsUnsubscribe(); } catch (e) {}
-    purchaseRequestsUnsubscribe = null;
-  }
-}
-
-async function syncFirestoreRecords() {
-  if (!currentAuthUser || !getFirestoreInstance()) {
-    firestoreRecordsCache = [];
-    firestoreRecordsLoaded = false;
-    return;
-  }
-
-  try {
-    const records = await getPurchaseRequestsForUser();
-    firestoreRecordsCache = dedupeRecords(records).map(record => ({
-      ...record,
-      id: record.id || (record.prNumber ? String(record.prNumber) : generateRecordId())
-    }));
-    firestoreRecordsLoaded = true;
-    setDatabaseRecords(firestoreRecordsCache);
-  } catch (error) {
-    console.error('Error syncing Firestore records:', error);
-    firestoreRecordsCache = [];
-    firestoreRecordsLoaded = false;
   }
 }
 
@@ -739,27 +319,16 @@ async function logAuditEvent(action, details) {
   if (!db || !currentAuthUser) return;
 
   try {
-    const cleanDetails = typeof details === 'object' && details !== null
-      ? cleanForFirestore(details)
-      : details;
-
-    const payload = {
+    await db.collection('auditLog').add({
       action: action,
-      details: cleanDetails,
+      details: details,
       userId: currentAuthUser.uid,
       userEmail: currentAuthUser.email,
       userRole: currentUserProfile?.role,
       userOffice: currentUserProfile?.office,
       timestamp: firebase.firestore.FieldValue.serverTimestamp()
-    };
-
-    const docRef = db.collection('auditLog').doc();
-    await docRef.set(payload);
+    });
   } catch (error) {
-    if (error?.code === 'already-exists') {
-      console.warn('Audit event already exists, skipping duplicate:', action, details);
-      return;
-    }
     console.error('Error logging audit event:', error);
   }
 }
@@ -820,22 +389,10 @@ async function handleAuthStateChanged(user) {
   // Save user profile to Firestore when they successfully authenticate
   if (user && currentUserProfile) {
     await saveUserProfileToFirestore(user);
-    await logAuditEvent('user_signin', { email: user.email });
-    // Migrate any localStorage-only records to Firestore before syncing
-    try {
-      await migrateLocalRecordsToFirestore();
-    } catch (e) {
-      console.warn('Local-to-Firestore migration failed:', e);
-    }
-    // start realtime listener for purchaseRequests (admins see all, users see office)
-    startPurchaseRequestsListener();
-    await syncFirestoreRecords();
-  } else {
-    firestoreRecordsCache = [];
-    firestoreRecordsLoaded = false;
+    logAuditEvent('user_signin', { email: user.email });
   }
   
-  await applyAuthState();
+  applyAuthState();
 }
 
 function signInWithFirebase() {
@@ -867,8 +424,6 @@ function signOutFirebase() {
   // Log the sign out event before signing out
   const email = currentAuthUser?.email;
   logAuditEvent('user_signout', { email: email });
-  // stop realtime listeners
-  stopPurchaseRequestsListener();
   
   auth.signOut().catch(error => {
     console.error('Sign out failed', error);
@@ -1283,7 +838,7 @@ function updateAuthUI() {
   }
 }
 
-async function applyAuthState() {
+function applyAuthState() {
   updateAuthUI();
   if (!currentUserProfile) {
     showLoginOverlay();
@@ -1294,7 +849,6 @@ async function applyAuthState() {
   updateHeaderImage();
   updateSectionDefaultsForLhio();
   updateRecordsTableSchema();
-  await loadNotifications();
   routeApp(window.location.hash || '#new');
 }
 
@@ -1384,45 +938,12 @@ function resolveDepartmentCode(value) {
 
 // Normalize PR number display: strip leading AUTO- prefix if present
 function cleanPrNumber(pr) {
-  if (!pr) return '';
+  if (!pr) return pr;
   try {
     return String(pr).replace(/^AUTO-/, '');
   } catch (e) {
-    return String(pr);
+    return pr;
   }
-}
-
-function getRecordIdentifier(record) {
-  if (!record || typeof record !== 'object') return '';
-  if (record.prNumber) return String(cleanPrNumber(record.prNumber));
-  if (record.id) return String(record.id);
-  if (record.timestamp) return String(record.timestamp);
-  return String(generateRecordId());
-}
-
-function dedupeRecords(records) {
-  if (!Array.isArray(records)) return [];
-  const recordMap = new Map();
-  records.forEach(record => {
-    const normalized = normalizeRecordStatus(record || {});
-    const key = getRecordIdentifier(normalized);
-    if (!key) return;
-    const existing = recordMap.get(key);
-    if (!existing) {
-      recordMap.set(key, normalized);
-      return;
-    }
-    // Use lastModified if available (tracks status/approval changes), otherwise use timestamp (creation time)
-    const currentTs = new Date(normalized.lastModified || normalized.timestamp || 0).getTime();
-    const existingTs = new Date(existing.lastModified || existing.timestamp || 0).getTime();
-    if (currentTs >= existingTs) {
-      // Merge existing and normalized so that partial updates (e.g. status
-      // changes) do not wipe other fields. Normalized takes precedence.
-      const merged = { ...existing, ...normalized };
-      recordMap.set(key, merged);
-    }
-  });
-  return Array.from(recordMap.values());
 }
 
 const sectionSelect = document.getElementById('section');
@@ -2035,12 +1556,6 @@ document.addEventListener('DOMContentLoaded', () => {
   const recordsYearFilter = document.getElementById('recordsYearFilter');
   if (recordsYearFilter) recordsYearFilter.addEventListener('change', filterRecords);
 
-  const markAllNotificationsReadBtn = document.getElementById('markAllNotificationsReadBtn');
-  if (markAllNotificationsReadBtn) markAllNotificationsReadBtn.addEventListener('click', markAllNotificationsRead);
-
-  const deleteAllNotificationsBtn = document.getElementById('deleteAllNotificationsBtn');
-  if (deleteAllNotificationsBtn) deleteAllNotificationsBtn.addEventListener('click', deleteAllNotifications);
-
   const archiveSearchBox = document.getElementById('archiveSearchBox');
   if (archiveSearchBox) archiveSearchBox.addEventListener('input', filterArchive);
 
@@ -2049,9 +1564,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const archiveYearFilter = document.getElementById('archiveYearFilter');
   if (archiveYearFilter) archiveYearFilter.addEventListener('change', filterArchive);
-
-  const deleteAllArchivedBtn = document.getElementById('deleteAllArchivedBtn');
-  if (deleteAllArchivedBtn) deleteAllArchivedBtn.addEventListener('click', deleteAllArchivedRecords);
 
   const createUserBtn = document.getElementById('createUserBtn');
   if (createUserBtn) createUserBtn.addEventListener('click', createOfficerAccount);
@@ -2276,7 +1788,7 @@ function validateAndBuildFormData() {
   return formData;
 }
 
-async function persistFormData(formData) {
+function persistFormData(formData) {
   const controlNumber = formData.controlNumber || generateControlNumber(formData);
   const isEditMode = formData.__meta?.isEditMode;
   const editPrNumber = formData.__meta?.editPrNumber;
@@ -2300,10 +1812,6 @@ async function persistFormData(formData) {
       timestamp: new Date().toISOString()
     };
 
-    if (currentAuthUser && getFirestoreInstance() && updatedRecord.id) {
-      await updatePurchaseRequestInFirestore(updatedRecord.id, updatedRecord);
-    }
-
     records.unshift(updatedRecord);
     setDatabaseRecords(records);
     alert('Record updated successfully!');
@@ -2319,7 +1827,7 @@ async function persistFormData(formData) {
   }
 
   // New record: save and then preview the saved version
-  await saveRecordToDatabase(formData);
+  saveRecordToDatabase(formData);
   // Ensure UI updated
   updateSummaryCards(getDatabaseRecords());
   renderRecordsTable(getDatabaseRecords());
@@ -2342,58 +1850,24 @@ function checkPreview() {
   showPreviewModal(formData);
 }
 
-async function saveForm() {
+function saveForm() {
   const formData = validateAndBuildFormData();
   if (!formData) return;
   if (!confirm('Please confirm: Are the details you entered correct? Click OK to save and preview.')) return;
   // Persist then preview the saved record
-  await persistFormData(formData);
-}
-
-function normalizeRecordStatus(record) {
-  if (!record || typeof record !== 'object') return record;
-  const normalized = { ...record };
-  const status = String(normalized.approvalStatus || normalized.status || '').toLowerCase().trim();
-  if (status) {
-    normalized.approvalStatus = status;
-    normalized.status = status;
-  }
-  return normalized;
-}
-
-function isVisibleRecord(record) {
-  if (!record || typeof record !== 'object') return false;
-  const status = String(record.approvalStatus || record.status || '').toLowerCase().trim();
-  // Keep rejected records visible on the records page so admins can archive them.
-  return status !== 'deleted';
+  persistFormData(formData);
 }
 
 function getDatabaseRecords() {
-  if (currentAuthUser && firestoreRecordsLoaded) {
-    return firestoreRecordsCache
-      .map(normalizeRecordStatus)
-      .filter(isVisibleRecord)
-      .map(record => ({ ...record }));
-  }
-
   const raw = JSON.parse(localStorage.getItem('purchaseRequestDatabase') || '[]');
   if (!Array.isArray(raw)) return [];
 
   let updated = false;
   const records = raw.map(r => {
-    const record = normalizeRecordStatus({
-      ...r,
-      prNumber: (r.prNumber ? String(r.prNumber).replace(/^AUTO-/, '') : r.prNumber)
-    });
+    const record = { ...r, prNumber: (r.prNumber ? String(r.prNumber).replace(/^AUTO-/, '') : r.prNumber) };
     if (!record.id) {
       record.id = record.timestamp || generateRecordId();
       updated = true;
-    }
-    if (!record.approvalStatus && record.status) {
-      record.approvalStatus = String(record.status).toLowerCase().trim();
-    }
-    if (!record.status && record.approvalStatus) {
-      record.status = String(record.approvalStatus).toLowerCase().trim();
     }
     return record;
   });
@@ -2402,25 +1876,11 @@ function getDatabaseRecords() {
     setDatabaseRecords(records);
   }
 
-  return dedupeRecords(records);
+  return records;
 }
 
 function setDatabaseRecords(records) {
-  if (currentAuthUser && firestoreRecordsLoaded) {
-    firestoreRecordsCache = dedupeRecords(records).map(record => ({ ...record }));
-  }
-  // Clean records of internal metadata (keys starting with __) and
-  // undefined values before persisting to localStorage. This prevents
-  // fields like `__meta.editPrNumber` from being stored and later
-  // causing Firestore update errors.
-  try {
-    const cleaned = Array.isArray(records) ? dedupeRecords(records).map(r => cleanForFirestore(r || {})) : [];
-    localStorage.setItem('purchaseRequestDatabase', JSON.stringify(cleaned));
-  } catch (e) {
-    console.warn('Failed to write database records to localStorage:', e);
-    // Fallback to raw write
-    try { localStorage.setItem('purchaseRequestDatabase', JSON.stringify(records)); } catch (e2) {}
-  }
+  localStorage.setItem('purchaseRequestDatabase', JSON.stringify(records));
 }
 
 function formatDimensionLabel(width, height, unit) {
@@ -2438,7 +1898,7 @@ function getItemSummary(item) {
   };
 }
 
-async function saveRecordToDatabase(formData) {
+function saveRecordToDatabase(formData) {
   const records = getDatabaseRecords();
   const summary = getItemSummary(formData.items[0] || {});
   const parsedDate = parseDateString(formData.prDate);
@@ -2446,49 +1906,16 @@ async function saveRecordToDatabase(formData) {
     ...formData,
     controlNumber: formData.controlNumber || generateControlNumber(formData),
     approvalStatus: formData.approvalStatus || 'pending',
-    status: formData.status || formData.approvalStatus || 'pending',
     nature: summary.nature,
     size: summary.size,
     quantity: summary.quantity,
     cost: formData.grandTotal,
     month: parsedDate ? String(parsedDate.getMonth() + 1).padStart(2, '0') : '',
     year: parsedDate ? String(parsedDate.getFullYear()) : '',
-    timestamp: formData.timestamp || new Date().toISOString()
+    timestamp: formData.timestamp || new Date().toISOString(),
+    createdBy: currentAuthUser?.uid || 'unknown',
+    createdByEmail: currentAuthUser?.email || 'unknown'
   };
-
-  const isEditMode = formData.__meta?.isEditMode;
-
-  if (currentAuthUser && getFirestoreInstance()) {
-    try {
-      if (isEditMode && record.id) {
-        await updatePurchaseRequestInFirestore(record.id, record);
-      } else {
-        const savedId = await savePurchaseRequestToFirestore(record);
-        if (savedId) {
-          record.id = savedId;
-        }
-      }
-
-      const index = record.id
-        ? records.findIndex(r => r.id === record.id)
-        : record.prNumber
-          ? records.findIndex(r => r.prNumber === record.prNumber)
-          : -1;
-      if (index >= 0) {
-        records[index] = record;
-      } else {
-        records.unshift(record);
-      }
-      firestoreRecordsCache = records.map(rec => ({ ...rec }));
-      firestoreRecordsLoaded = true;
-      setDatabaseRecords(records);
-      loadDatabaseRecords();
-      return;
-    } catch (error) {
-      console.error('Error saving record to Firestore:', error);
-    }
-  }
-
   const index = record.id
     ? records.findIndex(r => r.id === record.id)
     : record.prNumber
@@ -2501,77 +1928,6 @@ async function saveRecordToDatabase(formData) {
   }
   setDatabaseRecords(records);
   loadDatabaseRecords();
-}
-
-/**
- * Migrate records stored in localStorage (`purchaseRequestDatabase`) to Firestore.
- * Skips records that already exist in Firestore (by id, prNumber, or timestamp).
- */
-async function migrateLocalRecordsToFirestore() {
-  const db = getFirestoreInstance();
-  if (!db || !currentAuthUser) return;
-
-  let local = JSON.parse(localStorage.getItem('purchaseRequestDatabase') || '[]');
-  if (!Array.isArray(local) || local.length === 0) return;
-
-  try {
-    // Fetch existing purchase requests for this user (to avoid duplicates)
-    const snapshot = await db.collection('purchaseRequests')
-      .where('createdBy.uid', '==', currentAuthUser.uid)
-      .get();
-
-    const existing = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
-    const existingIds = new Set(existing.map(e => String(e.id)));
-    const existingPrNumbers = new Set(existing.map(e => String(e.prNumber || '').trim()));
-    const existingTimestamps = new Set(existing.map(e => String(e.timestamp || '').trim()));
-
-    let migrated = 0;
-
-    for (let i = 0; i < local.length; i++) {
-      const rec = local[i];
-      const recId = rec.id ? String(rec.id) : '';
-      const prNum = rec.prNumber ? String(rec.prNumber).trim() : '';
-      const ts = rec.timestamp ? String(rec.timestamp).trim() : '';
-
-      if (recId && existingIds.has(recId)) continue;
-      if (prNum && existingPrNumbers.has(prNum)) continue;
-      if (ts && existingTimestamps.has(ts)) continue;
-
-      // Prepare record for Firestore
-      const cleanRec = cleanForFirestore(rec || {});
-      const upload = {
-        ...cleanRec,
-        createdBy: {
-          uid: currentAuthUser.uid,
-          email: currentAuthUser.email,
-          name: currentUserProfile?.displayName,
-          role: currentUserProfile?.role,
-          office: currentUserProfile?.office
-        },
-        createdAt: firebase.firestore.FieldValue.serverTimestamp(),
-        updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
-        status: cleanRec.status || rec.status || rec.approvalStatus || 'draft'
-      };
-
-      try {
-        const added = await db.collection('purchaseRequests').add(upload);
-        // update local copy id so it maps to Firestore
-        rec.id = added.id;
-        migrated++;
-      } catch (err) {
-        console.warn('Failed migrating record to Firestore', err, rec);
-      }
-    }
-
-    if (migrated > 0) {
-      // Save updated local storage (now containing Firestore ids)
-      localStorage.setItem('purchaseRequestDatabase', JSON.stringify(local));
-      await logAuditEvent('migrate_local_records', { migrated });
-      console.log(`Migrated ${migrated} local record(s) to Firestore`);
-    }
-  } catch (error) {
-    console.error('Migration error:', error);
-  }
 }
 
 function loadDatabaseRecords() {
@@ -2587,13 +1943,12 @@ function routeApp(hash) {
 function setActiveView(view) {
   const newSection = document.getElementById('newRequestSection');
   const dashboardSection = document.getElementById('dashboardSection');
-  const notificationsSection = document.getElementById('notificationsSection');
   const recordsSection = document.getElementById('recordsSection');
   const archiveSection = document.getElementById('archiveSection');
   const usersSection = document.getElementById('usersSection');
   const helpSection = document.getElementById('helpSection');
 
-  const sections = [newSection, dashboardSection, notificationsSection, recordsSection, archiveSection, usersSection, helpSection];
+  const sections = [newSection, dashboardSection, recordsSection, archiveSection, usersSection, helpSection];
   sections.forEach(section => {
     if (!section) return;
     section.classList.add('hidden');
@@ -2607,9 +1962,6 @@ function setActiveView(view) {
   if (activeView === 'dashboard') {
     dashboardSection?.classList.remove('hidden');
     initDashboard();
-  } else if (activeView === 'notifications') {
-    notificationsSection?.classList.remove('hidden');
-    initNotifications();
   } else if (activeView === 'records') {
     recordsSection?.classList.remove('hidden');
     initRecords();
@@ -2642,10 +1994,6 @@ function initDashboard() {
   applyDashboardFilters();
 }
 
-function initNotifications() {
-  loadNotifications();
-}
-
 function initRecords() {
   const allRecords = getDatabaseRecords();
   let filteredRecords = allRecords;
@@ -2664,8 +2012,7 @@ function initRecords() {
   renderRecordsTable(filteredRecords);
 }
 
-async function initArchive() {
-  await loadArchiveRecordsFromFirestore();
+function initArchive() {
   const archivedRecords = getArchiveRecords();
   updateArchiveYearFilter(archivedRecords);
   renderArchiveTable(archivedRecords);
@@ -2673,53 +2020,23 @@ async function initArchive() {
 
 function getArchiveRecords() {
   const raw = JSON.parse(localStorage.getItem('purchaseRequestArchive') || '[]');
-  const localRecords = Array.isArray(raw) ? raw.map(r => {
+  if (!Array.isArray(raw)) return [];
+
+  let updated = false;
+  const records = raw.map(r => {
     const record = { ...r, prNumber: (r.prNumber ? String(r.prNumber).replace(/^AUTO-/, '') : r.prNumber) };
     if (!record.id) {
       record.id = record.archivedAt || record.timestamp || generateRecordId();
+      updated = true;
     }
-    return normalizeRecordStatus(record);
-  }) : [];
-
-  if (!archiveRecordsLoaded || !Array.isArray(archiveRecordsCache) || archiveRecordsCache.length === 0) {
-    return localRecords;
-  }
-
-  const merged = [...localRecords];
-  archiveRecordsCache.forEach(firestoreRecord => {
-    const existingIndex = merged.findIndex(r => r.id && firestoreRecord.id && r.id === firestoreRecord.id);
-    if (existingIndex >= 0) {
-      merged[existingIndex] = firestoreRecord;
-    } else {
-      merged.push(normalizeRecordStatus(firestoreRecord));
-    }
+    return record;
   });
 
-  return merged;
-}
-
-async function loadArchiveRecordsFromFirestore() {
-  const db = getFirestoreInstance();
-  if (!db || !currentAuthUser) {
-    archiveRecordsCache = [];
-    archiveRecordsLoaded = true;
-    return;
+  if (updated) {
+    localStorage.setItem('purchaseRequestArchive', JSON.stringify(records));
   }
 
-  try {
-    let query = db.collection('purchaseRequests').where('status', '==', 'deleted');
-    if (!isAdminUser()) {
-      query = query.where('createdBy.uid', '==', currentAuthUser.uid);
-    }
-
-    const snapshot = await query.get();
-    archiveRecordsCache = snapshot.docs.map(doc => normalizeRecordStatus({ id: doc.id, ...doc.data() }));
-  } catch (error) {
-    console.warn('Failed to load archived records from Firestore:', error);
-    archiveRecordsCache = [];
-  } finally {
-    archiveRecordsLoaded = true;
-  }
+  return records;
 }
 
 function updateRecordsYearFilter(records) {
@@ -2754,7 +2071,7 @@ function renderRecordsTable(records) {
   }
 
   tbody.innerHTML = records.map(record => {
-    const recordId = getRecordIdentifier(record);
+    const recordId = record.id || cleanPrNumber(record.prNumber);
     const amountString = record.grandTotal || record.cost || '₱0.00';
     const amount = parseFloat(amountString.replace(/[₱,]/g, '') || '0') || 0;
     const branch = getRecordBranch(record) || '-';
@@ -2763,7 +2080,7 @@ function renderRecordsTable(records) {
     const itemTitle = (record.items && record.items[0]?.itemDescription) || record.purpose || '-';
     const dateText = formatDateToLong(record.prDate) || record.prDate || '-';
     const controlNumber = record.controlNumber || 'TBD';
-    const status = String(record.approvalStatus || record.status || 'pending').toLowerCase().trim();
+    const status = String(record.approvalStatus || 'pending').toLowerCase();
     const statusLabel = status === 'approved' ? 'Approved' : status === 'rejected' ? 'Rejected' : 'Pending';
     const statusColor = status === 'approved' ? '#0b7c47' : status === 'rejected' ? '#d63031' : '#f39c12';
     let actions = `<button class="record-action-btn" onclick="openRecord('${recordId}', 'view')">View</button>`;
@@ -2772,6 +2089,10 @@ function renderRecordsTable(records) {
     }
     if (isAdminUser() && status === 'rejected') {
       actions += ` <button class="record-action-btn delete" onclick="deleteRecord('${recordId}')">Archive</button>`;
+    }
+    // Allow standard users to delete their own rejected records
+    if (isStandardUser() && status === 'rejected' && (record.createdBy === currentAuthUser?.uid || record.createdByEmail === currentAuthUser?.email)) {
+      actions += ` <button class="record-action-btn delete" onclick="deleteUserRecord('${recordId}')">Delete</button>`;
     }
 
     return `
@@ -2880,14 +2201,14 @@ function renderArchiveTable(records) {
   }
 
   tbody.innerHTML = records.map(record => {
-    const recordId = getRecordIdentifier(record);
+    const recordId = record.id || cleanPrNumber(record.prNumber);
     const controlNumber = record.controlNumber || record.prNumber || 'TBD';
     const amountString = record.grandTotal || record.cost || '₱0.00';
     const amount = parseFloat(amountString.replace(/[₱,]/g, '') || '0') || 0;
     const branch = getRecordBranch(record) || '-';
     const archivedAt = record.archivedAt ? new Date(record.archivedAt).toLocaleDateString('en-PH') : '-';
     const itemSize = formatRecordSize(record);
-    const status = String(record.approvalStatus || record.status || 'pending').toLowerCase().trim();
+    const status = String(record.approvalStatus || 'pending').toLowerCase();
     const statusLabel = status === 'approved' ? 'Approved' : status === 'rejected' ? 'Rejected' : 'Pending';
     const statusColor = status === 'approved' ? '#0b7c47' : status === 'rejected' ? '#d63031' : '#f39c12';
     return `
@@ -2941,100 +2262,32 @@ function filterArchive() {
   renderArchiveTable(records);
 }
 
-async function restoreArchivedRecord(recordId) {
+function restoreArchivedRecord(recordId) {
   const archived = getArchiveRecords();
   const index = archived.findIndex(record => record.id === recordId || cleanPrNumber(record.prNumber) === recordId);
   if (index === -1) return;
-
   const [record] = archived.splice(index, 1);
-  const restoredRecord = normalizeRecordStatus({
-    ...record,
-    archivedAt: undefined,
-    deletedBy: undefined,
-    deletedAt: undefined,
-    status: 'rejected',
-    approvalStatus: 'rejected'
-  });
-
-  localStorage.setItem('purchaseRequestArchive', JSON.stringify(archived));
-  archiveRecordsCache = archiveRecordsCache.filter(r => r.id !== restoredRecord.id);
-
+  record.archivedAt = undefined;
   const activeRecords = getDatabaseRecords();
-  activeRecords.unshift(restoredRecord);
+  activeRecords.unshift(record);
   setDatabaseRecords(activeRecords);
-
-  if (restoredRecord.id && getFirestoreInstance()) {
-    await updatePurchaseRequestInFirestore(restoredRecord.id, {
-      status: restoredRecord.status,
-      approvalStatus: restoredRecord.approvalStatus,
-      deletedBy: null,
-      deletedAt: null
-    }).catch(error => console.warn('Failed to restore archived record in Firestore:', error));
-  }
-
+  localStorage.setItem('purchaseRequestArchive', JSON.stringify(archived));
   alert('Record restored successfully.');
-  initRecords();
   initArchive();
+  initRecords();
 }
 
-async function permanentlyDeleteArchived(recordId) {
+function permanentlyDeleteArchived(recordId) {
   if (!confirm('⚠️ PERMANENT DELETE\n\nThis will permanently delete this archived record and cannot be undone.\n\nAre you sure?')) {
     return;
   }
   const archived = getArchiveRecords();
   const index = archived.findIndex(record => record.id === recordId || cleanPrNumber(record.prNumber) === recordId);
   if (index === -1) return;
-
-  const [record] = archived.splice(index, 1);
+  archived.splice(index, 1);
   localStorage.setItem('purchaseRequestArchive', JSON.stringify(archived));
-  archiveRecordsCache = archiveRecordsCache.filter(r => r.id !== recordId);
-
-  const db = getFirestoreInstance();
-  if (db && record.id) {
-    try {
-      await db.collection('purchaseRequests').doc(record.id).delete();
-    } catch (error) {
-      console.warn('Failed to delete archived Firestore record:', error);
-    }
-  }
-
   alert('✓ Record permanently deleted.');
   initArchive();
-}
-
-async function deleteAllArchivedRecords() {
-  await loadArchiveRecordsFromFirestore();
-  const archived = getArchiveRecords();
-  if (!archived.length) {
-    alert('There are no archived records to delete.');
-    return;
-  }
-
-  if (!confirm('⚠️ Delete all archived records? This will permanently remove all archived forms and cannot be undone.')) {
-    return;
-  }
-
-  const db = getFirestoreInstance();
-  if (db) {
-    try {
-      const batch = db.batch();
-      archived.forEach(record => {
-        if (record.id) {
-          batch.delete(db.collection('purchaseRequests').doc(record.id));
-        }
-      });
-      await batch.commit();
-    } catch (error) {
-      console.warn('Failed to delete archived records from Firestore:', error);
-    }
-  }
-
-  localStorage.setItem('purchaseRequestArchive', JSON.stringify([]));
-  archiveRecordsCache = [];
-  archiveRecordsLoaded = false;
-  initArchive();
-  applyDashboardFilters();
-  alert('All archived records have been deleted.');
 }
 
 function updateSummaryCards(records = []) {
@@ -3175,7 +2428,7 @@ function renderSavedRecordsTable(records) {
     const item = (record.items && record.items[0]) || {};
     const itemSize = formatRecordSize(record);
     const quantity = record.quantity || item.quantity || '-';
-    const recordId = getRecordIdentifier(record);
+    const recordId = record.id || cleanPrNumber(record.prNumber);
     const actions = `<button class="record-action-btn" onclick="openRecord('${recordId}', 'view')">View</button>`;
 
     return `
@@ -3192,146 +2445,85 @@ function renderSavedRecordsTable(records) {
   }).join('');
 }
 
-async function deleteRecord(recordId) {
+function deleteRecord(recordId) {
   if (!confirm('Are you sure you want to archive this record? It can be restored within 30 days.')) return;
   const records = getDatabaseRecords();
-  const recordIndex = records.findIndex(r => getRecordIdentifier(r) === recordId);
-  if (recordIndex === -1) {
-    console.warn('Archive action could not find record for id:', recordId, records.map(getRecordIdentifier));
-    return;
-  }
-  const [recordToArchive] = records.splice(recordIndex, 1);
-  recordToArchive.archivedAt = new Date().toISOString();
-  recordToArchive.status = 'deleted';
-  recordToArchive.approvalStatus = 'deleted';
-  recordToArchive.deletedBy = currentUserProfile?.displayName || currentAuthUser?.email || 'Admin';
-  recordToArchive.deletedAt = new Date().toISOString();
-  recordToArchive.lastModified = new Date().toISOString();
+  const index = records.findIndex(r => r.id === recordId || cleanPrNumber(r.prNumber) === recordId);
+  if (index === -1) return;
+  const [record] = records.splice(index, 1);
+  record.archivedAt = new Date().toISOString();
   const archived = JSON.parse(localStorage.getItem('purchaseRequestArchive') || '[]');
-  archived.push(recordToArchive);
-  // Persist archive locally first
+  archived.push(record);
   localStorage.setItem('purchaseRequestArchive', JSON.stringify(archived));
-
-  // If record has a Firestore id and Firestore is available, persist the
-  // deleted state to Firestore and only remove the active record if the
-  // server update succeeds. This avoids a race where a failed server
-  // update leaves the server copy in 'pending' which would later reappear
-  // via the realtime listener.
-  let persisted = true;
-  if (recordToArchive.id && getFirestoreInstance()) {
-    try {
-      // Persist full record so server has the same fields as the client.
-      const payload = { ...recordToArchive };
-      persisted = await updatePurchaseRequestInFirestore(recordToArchive.id, payload);
-    } catch (err) {
-      persisted = false;
-      console.warn('Failed to persist archive/delete status to Firestore:', err);
-    }
-  }
-
-  if (!persisted && recordToArchive.id && getFirestoreInstance()) {
-    // Revert local removal so UI matches server state and inform the user.
-    records.splice(recordIndex, 0, recordToArchive);
-    setDatabaseRecords(records);
-    initRecords();
-    applyDashboardFilters();
-    alert('Failed to archive record on server. Check your connection and try again.');
-    return;
-  }
-
-  // At this point either Firestore update succeeded, or the record was
-  // a purely local record; remove it from active records and refresh UI.
   setDatabaseRecords(records);
   initRecords();
   initArchive();
   applyDashboardFilters();
   alert('Record archived successfully! It can be restored within 30 days from the Archive menu.');
-
-  // Show the Archive view so the user sees the archived record immediately.
-  try {
-    window.location.hash = '#archive';
-  } catch (e) {
-    // ignore navigation errors
-  }
 }
 
-async function approveRecord(recordId) {
-  if (!confirm('Are you sure you want to approve this record?')) return;
+function deleteUserRecord(recordId) {
+  if (!confirm('Are you sure you want to delete this rejected form? It will be moved to the archive.')) return;
   const records = getDatabaseRecords();
-  const recordIndex = records.findIndex(r => getRecordIdentifier(r) === recordId);
-  if (recordIndex === -1) {
-    console.warn('Approve action could not find record for id:', recordId, records.map(getRecordIdentifier));
+  const index = records.findIndex(r => r.id === recordId || cleanPrNumber(r.prNumber) === recordId);
+  if (index === -1) return;
+  
+  const record = records[index];
+  
+  // Verify that the current user owns this record
+  if (record.createdBy !== currentAuthUser?.uid && record.createdByEmail !== currentAuthUser?.email) {
+    alert('You can only delete your own rejected forms.');
     return;
   }
-  const record = records[recordIndex];
-  console.log('Approving record (before):', record);
   
-  const updatedRecord = normalizeRecordStatus({
-    ...record,
-    approvalStatus: 'approved',
-    status: 'approved',
-    approvalBy: currentUserProfile?.displayName || 'Admin',
-    approvalAt: new Date().toISOString(),
-    lastModified: new Date().toISOString()
-  });
+  // Only allow deletion of rejected records
+  if (record.approvalStatus !== 'rejected') {
+    alert('You can only delete rejected forms.');
+    return;
+  }
   
-  console.log('Approving record (after):', updatedRecord);
-
-  records[recordIndex] = updatedRecord;
+  // Remove from active records and add to archive
+  const [archivedRecord] = records.splice(index, 1);
+  archivedRecord.archivedAt = new Date().toISOString();
+  archivedRecord.archivedBy = currentAuthUser?.email;
+  
+  const archived = JSON.parse(localStorage.getItem('purchaseRequestArchive') || '[]');
+  archived.push(archivedRecord);
+  
+  localStorage.setItem('purchaseRequestArchive', JSON.stringify(archived));
   setDatabaseRecords(records);
+  
+  // Update UI
+  initRecords();
+  initArchive();
+  applyDashboardFilters();
+  
+  alert('Rejected form deleted successfully and moved to archive!');
+}
 
-    if (updatedRecord.id && getFirestoreInstance()) {
-      // Persist the full record to ensure no fields are lost due to
-      // partial updates or client/server merge ordering.
-      try {
-        await updatePurchaseRequestInFirestore(updatedRecord.id, updatedRecord);
-        await notifyUserOfRequestDecision(updatedRecord, 'approved');
-      } catch (err) {
-        console.warn('Failed to persist full approved record to Firestore:', err);
-      }
-    }
-
-  await loadNotifications();
+function approveRecord(recordId) {
+  if (!confirm('Are you sure you want to approve this record?')) return;
+  const records = getDatabaseRecords();
+  const index = records.findIndex(r => r.id === recordId || cleanPrNumber(r.prNumber) === recordId);
+  if (index === -1) return;
+  records[index].approvalStatus = 'approved';
+  records[index].approvalBy = currentUserProfile?.displayName || 'Admin';
+  records[index].approvalAt = new Date().toISOString();
+  setDatabaseRecords(records);
   initRecords();
   applyDashboardFilters();
   alert('Record approved successfully. Total purchase value is updated for approved requests.');
 }
 
-async function rejectRecord(recordId) {
+function rejectRecord(recordId) {
   if (!confirm('Are you sure you want to reject this record?')) return;
   const records = getDatabaseRecords();
-  const recordIndex = records.findIndex(r => getRecordIdentifier(r) === recordId);
-  if (recordIndex === -1) {
-    console.warn('Reject action could not find record for id:', recordId, records.map(getRecordIdentifier));
-    return;
-  }
-  const record = records[recordIndex];
-  console.log('Rejecting record (before):', record);
-  
-  const updatedRecord = normalizeRecordStatus({
-    ...record,
-    approvalStatus: 'rejected',
-    status: 'rejected',
-    approvalBy: currentUserProfile?.displayName || 'Admin',
-    approvalAt: new Date().toISOString(),
-    lastModified: new Date().toISOString()
-  });
-  
-  console.log('Rejecting record (after):', updatedRecord);
-
-  records[recordIndex] = updatedRecord;
+  const index = records.findIndex(r => r.id === recordId || cleanPrNumber(r.prNumber) === recordId);
+  if (index === -1) return;
+  records[index].approvalStatus = 'rejected';
+  records[index].approvalBy = currentUserProfile?.displayName || 'Admin';
+  records[index].approvalAt = new Date().toISOString();
   setDatabaseRecords(records);
-
-  if (updatedRecord.id && getFirestoreInstance()) {
-    try {
-      await updatePurchaseRequestInFirestore(updatedRecord.id, updatedRecord);
-      await notifyUserOfRequestDecision(updatedRecord, 'rejected');
-    } catch (error) {
-      console.error('Error rejecting request in Firestore:', error);
-    }
-  }
-
-  await loadNotifications();
   initRecords();
   applyDashboardFilters();
   alert('Record rejected successfully. It will no longer be counted as approved.');
@@ -3404,7 +2596,7 @@ function applyDashboardFilters() {
 }
 
 function openRecord(recordId, action) {
-  const record = getDatabaseRecords().find(r => getRecordIdentifier(r) === recordId);
+  const record = getDatabaseRecords().find(r => r.id === recordId || cleanPrNumber(r.prNumber) === recordId);
   if (!record) return;
   if (action === 'view') {
     showPreviewModal(record);
@@ -3900,10 +3092,6 @@ function showPreviewModal(record) {
   // If the target is the old table1 template, write the embedded HTML into the new window so no separate file is required.
   if (targetTemplate && targetTemplate.includes('table1.html')) {
     const viewWindow = window.open('', 'PRPreview', 'width=1000,height=800,scrollbars=yes');
-    if (!viewWindow) {
-      alert('Unable to open preview window. Please allow popups for this site and try again.');
-      return;
-    }
     try {
       viewWindow.document.open();
       const previewOffice = record.selectedAreaLabel || getRecordBranch(record) || currentUserProfile?.office || 'PhilHealth Regional Office';
@@ -3933,10 +3121,6 @@ function showPreviewModal(record) {
 
   // Default behavior for other templates
   const viewWindow = window.open(targetTemplate, 'PRPreview', 'width=1000,height=800,scrollbars=yes');
-  if (!viewWindow) {
-    alert('Unable to open preview window. Please allow popups for this site and try again.');
-    return;
-  }
   
   // Wait for the window document to be ready
   let checkCount = 0;
@@ -4488,7 +3672,7 @@ function handleRecordAction(event) {
 
 function editRecord(recordId) {
   const records = getDatabaseRecords();
-  const record = records.find(r => getRecordIdentifier(r) === recordId);
+  const record = records.find(r => r.id === recordId || cleanPrNumber(r.prNumber) === recordId);
   if (!record) {
     alert('Record not found!');
     return;
