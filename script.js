@@ -534,6 +534,10 @@ function syncRecordsFromFirestore(firestoreRecords) {
         // Prefer Firestore data but preserve local id if missing
         const combined = Object.assign({}, local, fs);
         combined.firestoreId = fs.firestoreId || fs.id || combined.firestoreId;
+        // Always update approvalStatus/timestamps from Firestore to ensure authority
+        combined.approvalStatus = fs.status || fs.approvalStatus || combined.approvalStatus;
+        combined.approvalBy = fs.approvalBy || combined.approvalBy;
+        combined.approvalAt = fs.approvalAt ? (fs.approvalAt.toDate ? fs.approvalAt.toDate().toISOString() : fs.approvalAt) : combined.approvalAt;
         merged.push(combined);
         // Mark consumed
         if (fs.firestoreId) delete fsMap[fs.firestoreId];
@@ -550,24 +554,23 @@ function syncRecordsFromFirestore(firestoreRecords) {
       hasChanges = true;
     });
 
-    if (hasChanges) {
-      setDatabaseRecords(merged);
-      lastSyncedRecords = firestoreRecords;
+    // Persist merged results and refresh UI so updates (e.g., approvals/rejections)
+    // propagate immediately across clients even if only status changed.
+    setDatabaseRecords(merged);
+    lastSyncedRecords = firestoreRecords;
 
-      // Refresh current view if records are displayed
-      const currentView = window.location.hash.replace('#', '') || 'new';
-      if (currentView === 'dashboard') {
-        applyDashboardFilters();
-        updateSummaryCards(getDatabaseRecords());
-      } else if (currentView === 'records') {
-        filterRecords();
-        updateRecordsYearFilter(getDatabaseRecords());
-      } else if (currentView === 'archive') {
-        filterArchive();
-      }
-
-      console.log('Records synced from Firestore. Displaying', merged.length, 'total records');
+    const currentView = window.location.hash.replace('#', '') || 'new';
+    if (currentView === 'dashboard') {
+      applyDashboardFilters();
+      updateSummaryCards(getDatabaseRecords());
+    } else if (currentView === 'records') {
+      filterRecords();
+      updateRecordsYearFilter(getDatabaseRecords());
+    } else if (currentView === 'archive') {
+      filterArchive();
     }
+
+    console.log('Records synced from Firestore. Displaying', merged.length, 'total records');
   } catch (error) {
     console.error('Error syncing records from Firestore:', error);
   }
