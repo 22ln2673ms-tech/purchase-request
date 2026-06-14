@@ -482,6 +482,29 @@ async function fetchAndSyncFirestoreOnce() {
   }
 }
 
+// Push any local-only records (without firestoreId) to Firestore so other devices see them
+async function pushLocalRecordsToFirestore() {
+  const db = getFirestoreInstance();
+  if (!db || !currentAuthUser) return;
+  const locals = getDatabaseRecords();
+  const unsynced = locals.filter(r => !r.firestoreId);
+  if (!unsynced.length) {
+    updateSyncStatus('synced', 'Local up-to-date');
+    return;
+  }
+
+  updateSyncStatus('syncing', `Pushing ${unsynced.length} local record(s)...`);
+  for (const record of unsynced) {
+    try {
+      await saveRecordToFirestoreAsync(record);
+    } catch (e) {
+      console.warn('Failed to push local record to Firestore', e);
+      updateSyncStatus('failed', 'Push failed');
+    }
+  }
+  updateSyncStatus('synced', 'Local records pushed');
+}
+
 /**
  * Merge Firestore records with localStorage and refresh UI
  */
