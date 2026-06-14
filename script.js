@@ -392,6 +392,8 @@ function setupRealtimePurchaseRequestsListener() {
             approvalStatus: data.status || data.approvalStatus || 'pending',
             createdBy: data.createdBy?.uid,
             createdByEmail: data.createdBy?.email,
+            createdByRole: data.createdBy?.role,
+            createdByRole: data.createdBy?.role,
             timestamp: data.createdAt?.toDate?.()?.toISOString() || new Date().toISOString(),
             purpose: data.purpose,
             requestedByName: data.requestedByName,
@@ -1179,6 +1181,7 @@ function applyAuthState() {
   updateSectionDefaultsForLhio();
   updateRecordsTableSchema();
   routeApp(window.location.hash || '#new');
+  updateRecordsNotificationBadge();
 }
 
 function isLhioUser() {
@@ -2214,6 +2217,90 @@ function getDatabaseRecords() {
 
 function setDatabaseRecords(records) {
   localStorage.setItem('purchaseRequestDatabase', JSON.stringify(records));
+  updateRecordsNotificationBadge();
+}
+
+function getRecordNotificationKey(record) {
+  return String(record.firestoreId || record.prNumber || record.controlNumber || record.id || '').trim();
+}
+
+function getSeenResponseNotifications() {
+  try {
+    const raw = localStorage.getItem('purchaseRequestResponseSeen') || '{}';
+    return JSON.parse(raw) || {};
+  } catch (error) {
+    return {};
+  }
+}
+
+function saveSeenResponseNotifications(data) {
+  try {
+    localStorage.setItem('purchaseRequestResponseSeen', JSON.stringify(data || {}));
+  } catch (error) {
+    console.warn('Unable to persist response notifications', error);
+  }
+}
+
+function hasUserResponseNotifications() {
+  if (!currentAuthUser?.email) return false;
+  const normalizedEmail = currentAuthUser.email.toLowerCase().trim();
+  const seenNotifications = getSeenResponseNotifications();
+  return getDatabaseRecords().some(record => {
+    const recordKey = getRecordNotificationKey(record);
+    if (!recordKey) return false;
+    const isOwner = String(record.createdByEmail || '').toLowerCase().trim() === normalizedEmail;
+    const status = String(record.approvalStatus || record.status || 'pending').toLowerCase();
+    const isResponded = status === 'approved' || status === 'rejected';
+    return isOwner && isResponded && !seenNotifications[recordKey];
+  });
+}
+
+function markAllResponseNotificationsSeen() {
+  const normalizedEmail = currentAuthUser?.email?.toLowerCase().trim();
+  if (!normalizedEmail) return;
+  const seenNotifications = getSeenResponseNotifications();
+  getDatabaseRecords().forEach(record => {
+    const recordKey = getRecordNotificationKey(record);
+    if (!recordKey) return;
+    const isOwner = String(record.createdByEmail || '').toLowerCase().trim() === normalizedEmail;
+    const status = String(record.approvalStatus || record.status || 'pending').toLowerCase();
+    if (isOwner && (status === 'approved' || status === 'rejected')) {
+      seenNotifications[recordKey] = true;
+    }
+  });
+  saveSeenResponseNotifications(seenNotifications);
+  updateRecordsNotificationBadge();
+}
+
+function hasAdminNotificationItems() {
+  return getDatabaseRecords().some(record => {
+    const status = String(record.approvalStatus || record.status || 'pending').toLowerCase();
+    return status === 'pending';
+  });
+}
+
+function updateRecordsNotificationBadge() {
+  const badge = document.getElementById('recordsNotificationDot');
+  if (!badge) return;
+
+  if (!currentUserProfile) {
+    badge.classList.add('hidden');
+    return;
+  }
+
+  if (isAdminUser()) {
+    const show = hasAdminNotificationItems();
+    badge.classList.toggle('hidden', !show);
+    return;
+  }
+
+  if (isStandardUser()) {
+    const show = hasUserResponseNotifications();
+    badge.classList.toggle('hidden', !show);
+    return;
+  }
+
+  badge.classList.add('hidden');
 }
 
 function formatDimensionLabel(width, height, unit) {
@@ -2395,6 +2482,9 @@ function setActiveView(view) {
     initDashboard();
   } else if (activeView === 'records') {
     recordsSection?.classList.remove('hidden');
+    if (isStandardUser()) {
+      markAllResponseNotificationsSeen();
+    }
     initRecords();
   } else if (activeView === 'archive') {
     archiveSection?.classList.remove('hidden');
