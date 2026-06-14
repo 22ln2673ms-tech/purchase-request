@@ -468,22 +468,18 @@ async function fetchAndSyncFirestoreOnce() {
       });
     });
 
-        firestoreRecords.sort((a, b) => {
-          const aTime = new Date(a.timestamp).getTime();
-          const bTime = new Date(b.timestamp).getTime();
-          return bTime - aTime;
-        });
+    firestoreRecords.sort((a, b) => {
+      const aTime = new Date(a.timestamp).getTime();
+      const bTime = new Date(b.timestamp).getTime();
+      return bTime - aTime;
+    });
 
-  updateSyncStatus('syncing', `Pushing ${unsynced.length} local record(s)...`);
-  for (const record of unsynced) {
-    try {
-      await saveRecordToFirestoreAsync(record);
-    } catch (e) {
-      console.warn('Failed to push local record to Firestore', e);
-      updateSyncStatus('failed', 'Push failed');
-    }
+    syncRecordsFromFirestore(firestoreRecords);
+    updateSyncStatus('synced', firestoreRecords.length ? 'Fetched records' : 'No records');
+  } catch (e) {
+    console.warn('One-time fetch failed', e);
+    updateSyncStatus('failed', 'Fetch failed');
   }
-  updateSyncStatus('synced', 'Local records pushed');
 }
 
 /**
