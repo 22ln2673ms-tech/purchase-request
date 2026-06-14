@@ -562,7 +562,15 @@ function syncRecordsFromFirestore(firestoreRecords) {
           approvalStatus: combined.approvalStatus
         });
       } else {
-        merged.push(local);
+        const hasFirestoreReference = Boolean(local.firestoreId || local.id || local.prNumber || local.controlNumber);
+        if (hasFirestoreReference) {
+          console.debug('Dropping stale local record not present in active Firestore query:', {
+            localKey: localKeys,
+            status: local.approvalStatus
+          });
+        } else {
+          merged.push(local);
+        }
       }
     });
 
@@ -573,7 +581,34 @@ function syncRecordsFromFirestore(firestoreRecords) {
       console.debug('Added Firestore-only record to local store:', fsId, fs.prNumber || fs.controlNumber);
     });
 
-    setDatabaseRecords(merged);
+    // Also remove any local records whose IDs are present in Firestore but were excluded
+    // from the active query, because those records are now archived/rejected.
+    const activeFirestoreIds = new Set(firestoreRecords.map(r => r.firestoreId || r.id).filter(Boolean));
+    const activePrNumbers = new Set(firestoreRecords.map(r => String(r.prNumber || '').trim()).filter(Boolean));
+
+    const finalRecords = merged.filter(record => {
+      const recordId = record.firestoreId || record.id;
+      const prNumber = String(record.prNumber || '').trim();
+
+      if (record.isArchived) {
+        return false;
+      }
+
+      if (recordId && activeFirestoreIds.has(recordId)) {
+        return true;
+      }
+
+      if (prNumber && activePrNumbers.has(prNumber)) {
+        return true;
+      }
+
+      // If the record appears to reference Firestore but is no longer present in the active query,
+      // it should be removed because it has likely been archived/rejected.
+      const hasFirestoreReference = Boolean(record.firestoreId || record.id || record.prNumber || record.controlNumber);
+      return !hasFirestoreReference;
+    });
+
+    setDatabaseRecords(finalRecords);
     lastSyncedRecords = firestoreRecords;
 
     const currentView = window.location.hash.replace('#', '') || 'new';
