@@ -515,47 +515,64 @@ async function pushLocalRecordsToFirestore() {
  */
 function syncRecordsFromFirestore(firestoreRecords) {
   try {
-    // Get existing localStorage records
-    let localRecords = getDatabaseRecords();
-    
-    // Build map of firestore records by firestoreId
+    const localRecords = getDatabaseRecords();
     const fsMap = {};
-    firestoreRecords.forEach(r => { if (r.firestoreId) fsMap[r.firestoreId] = r; if (r.id) fsMap[r.id] = r; });
 
-    // Merge: prefer Firestore fields where available
-    let hasChanges = false;
+    function recordKeys(record) {
+      const keys = new Set();
+      if (record.firestoreId) keys.add(record.firestoreId);
+      if (record.id) keys.add(record.id);
+      if (record.prNumber) keys.add(String(record.prNumber).trim());
+      if (record.controlNumber) keys.add(String(record.controlNumber).trim());
+      if (record.createdByEmail) keys.add(String(record.createdByEmail).toLowerCase().trim());
+      return Array.from(keys).filter(Boolean);
+    }
+
+    firestoreRecords.forEach(r => {
+      recordKeys(r).forEach(key => {
+        fsMap[key] = r;
+      });
+    });
+
     const merged = [];
+    const usedFsIds = new Set();
 
-    // First, iterate local records and replace/merge with Firestore counterpart if present
     localRecords.forEach(local => {
-      const key = local.firestoreId || local.id || local.prNumber;
-      const fs = fsMap[key] || (local.prNumber && Object.values(fsMap).find(x => x.prNumber === local.prNumber));
+      const localKeys = recordKeys(local);
+      let fs = null;
+      for (const key of localKeys) {
+        if (fsMap[key]) {
+          fs = fsMap[key];
+          break;
+        }
+      }
+
       if (fs) {
-        // Prefer Firestore data but preserve local id if missing
         const combined = Object.assign({}, local, fs);
         combined.firestoreId = fs.firestoreId || fs.id || combined.firestoreId;
-        // Always update approvalStatus/timestamps from Firestore to ensure authority
         combined.approvalStatus = fs.status || fs.approvalStatus || combined.approvalStatus;
         combined.approvalBy = fs.approvalBy || combined.approvalBy;
         combined.approvalAt = fs.approvalAt ? (fs.approvalAt.toDate ? fs.approvalAt.toDate().toISOString() : fs.approvalAt) : combined.approvalAt;
         merged.push(combined);
-        // Mark consumed
-        if (fs.firestoreId) delete fsMap[fs.firestoreId];
-        if (fs.id) delete fsMap[fs.id];
-        hasChanges = true;
+        if (fs.firestoreId) usedFsIds.add(fs.firestoreId);
+        if (fs.id) usedFsIds.add(fs.id);
+        console.debug('Merged local record with Firestore record:', {
+          localKey: localKeys,
+          firestoreId: fs.firestoreId || fs.id,
+          approvalStatus: combined.approvalStatus
+        });
       } else {
         merged.push(local);
       }
     });
 
-    // Add any remaining Firestore records that were not in local
-    Object.keys(fsMap).forEach(k => {
-      merged.unshift(fsMap[k]);
-      hasChanges = true;
+    firestoreRecords.forEach(fs => {
+      const fsId = fs.firestoreId || fs.id;
+      if (!fsId || usedFsIds.has(fsId)) return;
+      merged.unshift(fs);
+      console.debug('Added Firestore-only record to local store:', fsId, fs.prNumber || fs.controlNumber);
     });
 
-    // Persist merged results and refresh UI so updates (e.g., approvals/rejections)
-    // propagate immediately across clients even if only status changed.
     setDatabaseRecords(merged);
     lastSyncedRecords = firestoreRecords;
 
