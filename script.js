@@ -3002,17 +3002,96 @@ async function updateApprovalStatusInFirestore(record, status) {
   if (!db) return;
 
   try {
-    const firestoreId = record.firestoreId || record.id;
-    await db.collection('purchaseRequests').doc(firestoreId).update({
+    updateSyncStatus('syncing', `${status === 'approved' ? 'Approving' : 'Rejecting'}...`);
+
+    // If we have a firestoreId, update directly
+    if (record.firestoreId) {
+      await db.collection('purchaseRequests').doc(record.firestoreId).update({
+        status: status,
+        approvalStatus: status,
+        approvalBy: currentUserProfile?.displayName || 'Admin',
+        approvalAt: firebase.firestore.FieldValue.serverTimestamp(),
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+      });
+      console.log('Approval status synced to Firestore:', record.firestoreId);
+      updateSyncStatus('synced', 'Status updated');
+      return;
+    }
+
+    // Fallback: try to find the document by prNumber or controlNumber
+    const identifier = record.prNumber || record.controlNumber || null;
+    if (identifier) {
+      const snapshot = await db.collection('purchaseRequests').where('prNumber', '==', identifier).limit(1).get();
+      if (!snapshot.empty) {
+        const doc = snapshot.docs[0];
+        await doc.ref.update({
+          status: status,
+          approvalStatus: status,
+          approvalBy: currentUserProfile?.displayName || 'Admin',
+          approvalAt: firebase.firestore.FieldValue.serverTimestamp(),
+          updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+
+        // Persist firestoreId locally for future direct updates
+        try {
+          const local = getDatabaseRecords();
+          const idx = local.findIndex(r => (r.prNumber && r.prNumber === identifier) || r.controlNumber === identifier || r.id === record.id);
+          if (idx >= 0) {
+            local[idx].firestoreId = doc.id;
+            local[idx].approvalStatus = status;
+            local[idx].approvalBy = currentUserProfile?.displayName || 'Admin';
+            local[idx].approvalAt = new Date().toISOString();
+            setDatabaseRecords(local);
+          }
+        } catch (e) { console.warn('Unable to persist firestoreId locally after approval update', e); }
+
+        console.log('Approval status synced via lookup to Firestore:', doc.id);
+        updateSyncStatus('synced', 'Status updated');
+        return;
+      }
+    }
+
+    // If no document found, create one to represent this record and set the status
+    const recordData = {
+      prNumber: record.prNumber || record.id || null,
+      controlNumber: record.controlNumber || null,
+      prDate: record.prDate || null,
+      department: record.department || null,
+      items: record.items || [],
+      grandTotal: record.grandTotal || record.cost || 0,
       status: status,
       approvalStatus: status,
       approvalBy: currentUserProfile?.displayName || 'Admin',
       approvalAt: firebase.firestore.FieldValue.serverTimestamp(),
+      createdBy: {
+        uid: record.createdBy || currentAuthUser?.uid || null,
+        email: record.createdByEmail || currentAuthUser?.email || null,
+        name: record.createdByName || null,
+        office: record.createdByOffice || null
+      },
+      createdAt: firebase.firestore.FieldValue.serverTimestamp(),
       updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-    });
-    console.log('Approval status synced to Firestore:', firestoreId);
+    };
+
+    const newDoc = await db.collection('purchaseRequests').add(recordData);
+    console.log('Approval status created new Firestore doc:', newDoc.id);
+
+    // Persist firestoreId locally
+    try {
+      const local = getDatabaseRecords();
+      const idx = local.findIndex(r => r.id === record.id || (record.prNumber && r.prNumber === record.prNumber) || r.controlNumber === record.controlNumber);
+      if (idx >= 0) {
+        local[idx].firestoreId = newDoc.id;
+        local[idx].approvalStatus = status;
+        local[idx].approvalBy = currentUserProfile?.displayName || 'Admin';
+        local[idx].approvalAt = new Date().toISOString();
+        setDatabaseRecords(local);
+      }
+    } catch (e) { console.warn('Unable to persist new firestoreId locally after create', e); }
+    updateSyncStatus('synced', 'Status updated');
   } catch (error) {
     console.error('Error updating Firestore approval status:', error);
+    updateSyncStatus('failed', 'Status update failed');
   }
 }
 
