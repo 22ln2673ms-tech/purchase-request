@@ -199,6 +199,7 @@ async function savePurchaseRequestToFirestore(requestData) {
   }
 
   try {
+    updateSyncStatus('syncing', 'Saving to server...');
     const docRef = await db.collection('purchaseRequests').add({
       ...requestData,
       createdBy: {
@@ -214,9 +215,11 @@ async function savePurchaseRequestToFirestore(requestData) {
     });
 
     console.log('Purchase request saved:', docRef.id);
+    updateSyncStatus('synced', 'Saved to server');
     return docRef.id;
   } catch (error) {
     console.error('Error saving purchase request:', error);
+    updateSyncStatus('failed', 'Save failed');
     alert('Failed to save purchase request: ' + error.message);
     return null;
   }
@@ -235,6 +238,7 @@ async function updatePurchaseRequestInFirestore(requestId, updates) {
   if (!db) return false;
 
   try {
+    updateSyncStatus('syncing', 'Updating server...');
     await db.collection('purchaseRequests').doc(requestId).update({
       ...updates,
       updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
@@ -246,9 +250,11 @@ async function updatePurchaseRequestInFirestore(requestId, updates) {
     });
 
     console.log('Purchase request updated:', requestId);
+    updateSyncStatus('synced', 'Updated on server');
     return true;
   } catch (error) {
     console.error('Error updating purchase request:', error);
+    updateSyncStatus('failed', 'Update failed');
     alert('Failed to update purchase request: ' + error.message);
     return false;
   }
@@ -369,10 +375,13 @@ function setupRealtimePurchaseRequestsListener() {
     purchaseRequestsUnsubscribe = query.onSnapshot(
       (snapshot) => {
         console.log('Firestore update detected, syncing records...');
+        updateSyncStatus('syncing', 'Receiving updates...');
         const firestoreRecords = [];
 
         snapshot.forEach(doc => {
           const data = doc.data();
+          // Skip archived documents (they are stored locally in archive)
+          if (data && data.isArchived) return;
           firestoreRecords.push({
             id: doc.id,
             firestoreId: doc.id,
@@ -413,9 +422,11 @@ function setupRealtimePurchaseRequestsListener() {
 
         // Merge Firestore records with localStorage records
         syncRecordsFromFirestore(firestoreRecords);
+        updateSyncStatus('synced', 'Realtime updates applied');
       },
       (error) => {
         console.error('Error listening to purchase requests:', error);
+        updateSyncStatus('failed', 'Realtime listener error');
       }
     );
 
@@ -423,6 +434,80 @@ function setupRealtimePurchaseRequestsListener() {
   } catch (error) {
     console.error('Error setting up real-time listener:', error);
   }
+}
+
+// One-time fetch to sync Firestore -> local immediately after login
+async function fetchAndSyncFirestoreOnce() {
+  const db = getFirestoreInstance();
+  if (!db || !currentAuthUser) return;
+  updateSyncStatus('syncing', 'Fetching from server...');
+
+  try {
+    let query = db.collection('purchaseRequests');
+    if (isStandardUser() && currentUserProfile?.office) {
+      query = query.where('createdBy.office', '==', currentUserProfile.office);
+    }
+    try { query = query.orderBy('createdAt', 'desc'); } catch (e) {}
+
+    const snapshot = await query.get();
+    const firestoreRecords = [];
+    snapshot.forEach(doc => {
+      const data = doc.data();
+      if (data && data.isArchived) return; // skip archived
+      firestoreRecords.push({
+        id: doc.id,
+        firestoreId: doc.id,
+        prNumber: data.prNumber || `AUTO-${doc.id}`,
+        prDate: data.prDate,
+        department: data.department,
+        departmentCode: data.departmentCode,
+        section: data.section,
+        selectedArea: data.selectedArea,
+        selectedAreaLabel: data.selectedAreaLabel,
+        items: data.items || [],
+        grandTotal: data.grandTotal,
+        approvalStatus: data.status || data.approvalStatus || 'pending',
+        createdBy: data.createdBy?.uid,
+        createdByEmail: data.createdBy?.email,
+        timestamp: data.createdAt?.toDate?.()?.toISOString() || new Date().toISOString(),
+        purpose: data.purpose,
+        controlNumber: data.controlNumber
+      });
+    });
+
+    if (firestoreRecords.length) {
+      syncRecordsFromFirestore(firestoreRecords);
+      updateSyncStatus('synced', 'Fetched records');
+    } else {
+      updateSyncStatus('synced', 'No records');
+    }
+  } catch (e) {
+    console.warn('One-time fetch failed', e);
+    updateSyncStatus('failed', 'Fetch failed');
+  }
+}
+
+// Push any local-only records (without firestoreId) to Firestore so other devices see them
+async function pushLocalRecordsToFirestore() {
+  const db = getFirestoreInstance();
+  if (!db || !currentAuthUser) return;
+  const locals = getDatabaseRecords();
+  const unsynced = locals.filter(r => !r.firestoreId);
+  if (!unsynced.length) {
+    updateSyncStatus('synced', 'Local up-to-date');
+    return;
+  }
+
+  updateSyncStatus('syncing', `Pushing ${unsynced.length} local record(s)...`);
+  for (const record of unsynced) {
+    try {
+      await saveRecordToFirestoreAsync(record);
+    } catch (e) {
+      console.warn('Failed to push local record to Firestore', e);
+      updateSyncStatus('failed', 'Push failed');
+    }
+  }
+  updateSyncStatus('synced', 'Local records pushed');
 }
 
 /**
@@ -488,6 +573,32 @@ function syncRecordsFromFirestore(firestoreRecords) {
   }
 }
 
+// Update the sync status banner
+function updateSyncStatus(state, text) {
+  try {
+    const banner = document.getElementById('syncStatusBanner');
+    const label = document.getElementById('syncStatusText');
+    if (!banner || !label) return;
+    banner.classList.remove('syncing', 'synced', 'failed', 'hidden');
+    if (state === 'syncing') {
+      banner.classList.add('syncing');
+      label.textContent = text || 'Syncing...';
+    } else if (state === 'synced') {
+      banner.classList.add('synced');
+      label.textContent = text || 'All changes saved';
+      setTimeout(() => { banner.classList.add('hidden'); }, 2500);
+    } else if (state === 'failed') {
+      banner.classList.add('failed');
+      label.textContent = text || 'Sync failed';
+    } else {
+      banner.classList.add('hidden');
+      label.textContent = text || 'Idle';
+    }
+  } catch (e) {
+    console.warn('updateSyncStatus error', e);
+  }
+}
+
 async function resolveUserProfile(user) {
   if (!user || !user.email) return null;
 
@@ -548,6 +659,10 @@ async function handleAuthStateChanged(user) {
     
     // Set up real-time sync listener for purchase requests
     setupRealtimePurchaseRequestsListener();
+    // Fetch existing Firestore records once to ensure localStorage is up-to-date immediately
+    fetchAndSyncFirestoreOnce();
+    // Push any unsynced local records (created while offline or before login) to Firestore
+    pushLocalRecordsToFirestore();
   } else {
     // User signed out - unsubscribe from real-time listener
     if (purchaseRequestsUnsubscribe) {
@@ -2538,6 +2653,25 @@ function restoreArchivedRecord(recordId) {
   activeRecords.unshift(record);
   setDatabaseRecords(activeRecords);
   localStorage.setItem('purchaseRequestArchive', JSON.stringify(archived));
+  // Sync restore to Firestore (clear isArchived)
+  (async () => {
+    const db = getFirestoreInstance();
+    if (!db) return;
+    try {
+      const firestoreId = record.firestoreId || record.id;
+      if (firestoreId) {
+        await db.collection('purchaseRequests').doc(firestoreId).update({ isArchived: false, archivedAt: null, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+        console.log('Restored record in Firestore:', firestoreId);
+      } else if (record.prNumber) {
+        const snap = await db.collection('purchaseRequests').where('prNumber', '==', record.prNumber).limit(5).get();
+        snap.forEach(async d => {
+          await db.collection('purchaseRequests').doc(d.id).update({ isArchived: false, archivedAt: null, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+        });
+      }
+    } catch (e) {
+      console.warn('Failed to restore record in Firestore', e);
+    }
+  })();
   alert('Record restored successfully.');
   initArchive();
   initRecords();
@@ -2550,8 +2684,30 @@ function permanentlyDeleteArchived(recordId) {
   const archived = getArchiveRecords();
   const index = archived.findIndex(record => record.id === recordId || cleanPrNumber(record.prNumber) === recordId);
   if (index === -1) return;
-  archived.splice(index, 1);
+  const [record] = archived.splice(index, 1);
   localStorage.setItem('purchaseRequestArchive', JSON.stringify(archived));
+
+  // Attempt to delete from Firestore as well
+  (async () => {
+    const db = getFirestoreInstance();
+    if (!db) return;
+    try {
+      const firestoreId = record.firestoreId || record.id;
+      if (firestoreId) {
+        await db.collection('purchaseRequests').doc(firestoreId).delete();
+        console.log('Deleted archived record from Firestore:', firestoreId);
+      } else if (record.prNumber) {
+        const snap = await db.collection('purchaseRequests').where('prNumber', '==', record.prNumber).limit(5).get();
+        const batch = db.batch();
+        snap.forEach(d => batch.delete(db.collection('purchaseRequests').doc(d.id)));
+        await batch.commit();
+        console.log('Deleted archived records from Firestore by prNumber');
+      }
+    } catch (e) {
+      console.warn('Failed to delete archived record from Firestore', e);
+    }
+  })();
+
   alert('✓ Record permanently deleted.');
   initArchive();
 }
@@ -2726,6 +2882,39 @@ function deleteRecord(recordId) {
   initArchive();
   applyDashboardFilters();
   alert('Record archived successfully! It can be restored within 30 days from the Archive menu.');
+
+  // Sync archive to Firestore (best-effort)
+  try { syncArchiveToFirestore(record); } catch (e) { console.warn('Archive sync error', e); }
+}
+
+// Sync archive flag to Firestore when archiving a record
+async function syncArchiveToFirestore(record) {
+  const db = getFirestoreInstance();
+  if (!db) return;
+
+  try {
+    const firestoreId = record.firestoreId || record.id;
+    if (firestoreId) {
+      await db.collection('purchaseRequests').doc(firestoreId).update({
+        isArchived: true,
+        archivedAt: firebase.firestore.FieldValue.serverTimestamp(),
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+      });
+      console.log('Record archived in Firestore:', firestoreId);
+      return;
+    }
+
+    // Fallback: try to find by prNumber
+    if (record.prNumber) {
+      const snap = await db.collection('purchaseRequests').where('prNumber', '==', record.prNumber).limit(5).get();
+      snap.forEach(async d => {
+        await db.collection('purchaseRequests').doc(d.id).update({ isArchived: true, archivedAt: firebase.firestore.FieldValue.serverTimestamp(), updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+        console.log('Record archived in Firestore by prNumber:', d.id);
+      });
+    }
+  } catch (e) {
+    console.warn('Failed to sync archive to Firestore', e);
+  }
 }
 
 function deleteUserRecord(recordId) {
@@ -2765,6 +2954,8 @@ function deleteUserRecord(recordId) {
   applyDashboardFilters();
   
   alert('Rejected form deleted successfully and moved to archive!');
+  // Sync to Firestore archive flag
+  try { syncArchiveToFirestore(archivedRecord); } catch (e) { console.warn('Archive sync error', e); }
 }
 
 function approveRecord(recordId) {

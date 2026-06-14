@@ -184,6 +184,24 @@ select {
   position: relative;
 }
 
+.sync-status {
+  position: absolute;
+  top: 14px;
+  right: 18px;
+  background: rgba(0,0,0,0.06);
+  color: var(--text);
+  padding: 8px 12px;
+  border-radius: 10px;
+  font-weight: 600;
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+}
+.sync-status.hidden { display: none; }
+.sync-status.syncing { background: linear-gradient(90deg,#fff3cd,#ffe8a1); color:#6b4b00; }
+.sync-status.synced { background: linear-gradient(90deg,#d4edda,#a9e2b9); color:#0b7c47; }
+.sync-status.failed { background: linear-gradient(90deg,#f8d7da,#f1a3a8); color:#7a1f1f; }
+
 .header-image-section {
   width: 100%;
   display: flex;
