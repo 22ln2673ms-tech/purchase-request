@@ -358,6 +358,13 @@ function setupRealtimePurchaseRequestsListener() {
       query = query.where('createdBy.office', '==', currentUserProfile.office);
     }
 
+    // Order by createdAt so newer documents arrive first
+    try {
+      query = query.orderBy('createdAt', 'desc');
+    } catch (e) {
+      // If createdAt doesn't exist for some docs, fall back silently
+    }
+
     // Set up real-time listener
     purchaseRequestsUnsubscribe = query.onSnapshot(
       (snapshot) => {
@@ -426,33 +433,42 @@ function syncRecordsFromFirestore(firestoreRecords) {
     // Get existing localStorage records
     let localRecords = getDatabaseRecords();
     
-    // Create a map of local records by ID for quick lookup
-    const localMap = {};
-    localRecords.forEach(r => {
-      if (r.firestoreId) localMap[r.firestoreId] = r;
-      if (r.id) localMap[r.id] = r;
-    });
+    // Build map of firestore records by firestoreId
+    const fsMap = {};
+    firestoreRecords.forEach(r => { if (r.firestoreId) fsMap[r.firestoreId] = r; if (r.id) fsMap[r.id] = r; });
 
-    // Update or add Firestore records to local storage
+    // Merge: prefer Firestore fields where available
     let hasChanges = false;
-    firestoreRecords.forEach(firestoreRecord => {
-      const existingKey = firestoreRecord.firestoreId || firestoreRecord.id;
-      const existingLocal = localMap[existingKey];
+    const merged = [];
 
-      // If this is a new record or the Firestore one is newer, sync it
-      if (!existingLocal || new Date(firestoreRecord.timestamp) > new Date(existingLocal.timestamp)) {
-        // Remove old version if exists
-        localRecords = localRecords.filter(r => r.id !== firestoreRecord.id && r.id !== firestoreRecord.firestoreId);
-        // Add Firestore version
-        localRecords.unshift(firestoreRecord);
+    // First, iterate local records and replace/merge with Firestore counterpart if present
+    localRecords.forEach(local => {
+      const key = local.firestoreId || local.id || local.prNumber;
+      const fs = fsMap[key] || (local.prNumber && Object.values(fsMap).find(x => x.prNumber === local.prNumber));
+      if (fs) {
+        // Prefer Firestore data but preserve local id if missing
+        const combined = Object.assign({}, local, fs);
+        combined.firestoreId = fs.firestoreId || fs.id || combined.firestoreId;
+        merged.push(combined);
+        // Mark consumed
+        if (fs.firestoreId) delete fsMap[fs.firestoreId];
+        if (fs.id) delete fsMap[fs.id];
         hasChanges = true;
+      } else {
+        merged.push(local);
       }
     });
 
+    // Add any remaining Firestore records that were not in local
+    Object.keys(fsMap).forEach(k => {
+      merged.unshift(fsMap[k]);
+      hasChanges = true;
+    });
+
     if (hasChanges) {
-      setDatabaseRecords(localRecords);
+      setDatabaseRecords(merged);
       lastSyncedRecords = firestoreRecords;
-      
+
       // Refresh current view if records are displayed
       const currentView = window.location.hash.replace('#', '') || 'new';
       if (currentView === 'dashboard') {
@@ -464,8 +480,8 @@ function syncRecordsFromFirestore(firestoreRecords) {
       } else if (currentView === 'archive') {
         filterArchive();
       }
-      
-      console.log('Records synced from Firestore. Displaying', localRecords.length, 'total records');
+
+      console.log('Records synced from Firestore. Displaying', merged.length, 'total records');
     }
   } catch (error) {
     console.error('Error syncing records from Firestore:', error);
@@ -2144,9 +2160,35 @@ async function saveRecordToFirestoreAsync(record) {
     if (record.firestoreId) {
       await db.collection('purchaseRequests').doc(record.firestoreId).set(recordData, { merge: true });
       console.log('Purchase request updated in Firestore:', record.firestoreId);
+
+      // Ensure local record has firestoreId set
+      try {
+        const local = getDatabaseRecords();
+        const idx = local.findIndex(r => r.id === record.id || r.firestoreId === record.firestoreId);
+        if (idx >= 0) {
+          local[idx].firestoreId = record.firestoreId;
+          setDatabaseRecords(local);
+        }
+      } catch (e) { console.warn('Unable to persist firestoreId locally after update', e); }
     } else {
       const docRef = await db.collection('purchaseRequests').add(recordData);
       console.log('Purchase request saved to Firestore:', docRef.id);
+
+      // Persist the generated firestoreId back to localStorage for this record
+      try {
+        const snapshot = await docRef.get();
+        const data = snapshot.exists ? snapshot.data() : null;
+        const local = getDatabaseRecords();
+        const idx = local.findIndex(r => r.id === record.id || (r.prNumber && r.prNumber === record.prNumber));
+        if (idx >= 0) {
+          local[idx].firestoreId = docRef.id;
+          // Update timestamp if available from server
+          if (data && data.createdAt && typeof data.createdAt.toDate === 'function') {
+            local[idx].timestamp = data.createdAt.toDate().toISOString();
+          }
+          setDatabaseRecords(local);
+        }
+      } catch (e) { console.warn('Unable to persist firestoreId locally after add', e); }
     }
   } catch (error) {
     console.error('Error saving to Firestore:', error);
