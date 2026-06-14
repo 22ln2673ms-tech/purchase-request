@@ -276,9 +276,7 @@ async function getPurchaseRequestsForUser() {
       query = query.where('createdBy.office', '==', currentUserProfile.office);
     }
 
-    // Order by most recent first
-    query = query.orderBy('createdAt', 'desc');
-
+    // Avoid Firestore composite index requirements by sorting locally.
     const snapshot = await query.get();
     const requests = [];
     
@@ -364,12 +362,9 @@ function setupRealtimePurchaseRequestsListener() {
       query = query.where('createdBy.office', '==', currentUserProfile.office);
     }
 
-    // Order by createdAt so newer documents arrive first
-    try {
-      query = query.orderBy('createdAt', 'desc');
-    } catch (e) {
-      // If createdAt doesn't exist for some docs, fall back silently
-    }
+    // Use a simple query and sort locally to avoid requiring a composite Firestore index
+    // for where('createdBy.office', '==', ...) combined with orderBy('createdAt', ...).
+    // This keeps the user list synced without needing a manual index setup.
 
     // Set up real-time listener
     purchaseRequestsUnsubscribe = query.onSnapshot(
@@ -447,8 +442,6 @@ async function fetchAndSyncFirestoreOnce() {
     if (isStandardUser() && currentUserProfile?.office) {
       query = query.where('createdBy.office', '==', currentUserProfile.office);
     }
-    try { query = query.orderBy('createdAt', 'desc'); } catch (e) {}
-
     const snapshot = await query.get();
     const firestoreRecords = [];
     snapshot.forEach(doc => {
@@ -475,28 +468,11 @@ async function fetchAndSyncFirestoreOnce() {
       });
     });
 
-    if (firestoreRecords.length) {
-      syncRecordsFromFirestore(firestoreRecords);
-      updateSyncStatus('synced', 'Fetched records');
-    } else {
-      updateSyncStatus('synced', 'No records');
-    }
-  } catch (e) {
-    console.warn('One-time fetch failed', e);
-    updateSyncStatus('failed', 'Fetch failed');
-  }
-}
-
-// Push any local-only records (without firestoreId) to Firestore so other devices see them
-async function pushLocalRecordsToFirestore() {
-  const db = getFirestoreInstance();
-  if (!db || !currentAuthUser) return;
-  const locals = getDatabaseRecords();
-  const unsynced = locals.filter(r => !r.firestoreId);
-  if (!unsynced.length) {
-    updateSyncStatus('synced', 'Local up-to-date');
-    return;
-  }
+        firestoreRecords.sort((a, b) => {
+          const aTime = new Date(a.timestamp).getTime();
+          const bTime = new Date(b.timestamp).getTime();
+          return bTime - aTime;
+        });
 
   updateSyncStatus('syncing', `Pushing ${unsynced.length} local record(s)...`);
   for (const record of unsynced) {
