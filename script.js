@@ -78,6 +78,10 @@ let userAccountsSearch = '';
 let pendingPasswordResetEmail = '';
 const USER_ACCOUNTS_PER_PAGE = 15;
 
+// Real-time sync variables
+let purchaseRequestsUnsubscribe = null;
+let lastSyncedRecords = [];
+
 function initializeFirebaseAuth() {
   if (!window.firebase || !firebase.initializeApp || !firebase.auth) {
     console.warn('Firebase SDK not loaded. Firebase Auth is disabled.');
@@ -333,6 +337,141 @@ async function logAuditEvent(action, details) {
   }
 }
 
+/**
+ * REAL-TIME SYNC: Set up a listener for purchase requests from Firestore
+ * Automatically syncs new/updated records to localStorage and refreshes UI across all tabs/devices
+ */
+function setupRealtimePurchaseRequestsListener() {
+  const db = getFirestoreInstance();
+  if (!db || !currentAuthUser) return;
+
+  // Unsubscribe from previous listener if any
+  if (purchaseRequestsUnsubscribe) {
+    purchaseRequestsUnsubscribe();
+  }
+
+  try {
+    let query = db.collection('purchaseRequests');
+
+    // Standard users only see requests from their office
+    if (isStandardUser() && currentUserProfile?.office) {
+      query = query.where('createdBy.office', '==', currentUserProfile.office);
+    }
+
+    // Set up real-time listener
+    purchaseRequestsUnsubscribe = query.onSnapshot(
+      (snapshot) => {
+        console.log('Firestore update detected, syncing records...');
+        const firestoreRecords = [];
+
+        snapshot.forEach(doc => {
+          const data = doc.data();
+          firestoreRecords.push({
+            id: doc.id,
+            firestoreId: doc.id,
+            prNumber: data.prNumber || `AUTO-${doc.id}`,
+            prDate: data.prDate,
+            department: data.department,
+            departmentCode: data.departmentCode,
+            section: data.section,
+            selectedArea: data.selectedArea,
+            selectedAreaLabel: data.selectedAreaLabel,
+            items: data.items || [],
+            grandTotal: data.grandTotal,
+            approvalStatus: data.status || data.approvalStatus || 'pending',
+            createdBy: data.createdBy?.uid,
+            createdByEmail: data.createdBy?.email,
+            timestamp: data.createdAt?.toDate?.()?.toISOString() || new Date().toISOString(),
+            purpose: data.purpose,
+            requestedByName: data.requestedByName,
+            recommendedByName: data.recommendedByName,
+            approvedByName: data.approvedByName,
+            requestedByDesignation: data.requestedByDesignation,
+            recommendedByDesignation: data.recommendedByDesignation,
+            approvedByDesignation: data.approvedByDesignation,
+            agency: data.agency,
+            saiNumber: data.saiNumber,
+            unit: data.unit,
+            pricePerSqFt: data.pricePerSqFt,
+            nature: data.nature,
+            size: data.size,
+            quantity: data.quantity,
+            cost: data.cost,
+            month: data.month,
+            year: data.year,
+            controlNumber: data.controlNumber,
+            footerVisible: data.footerVisible
+          });
+        });
+
+        // Merge Firestore records with localStorage records
+        syncRecordsFromFirestore(firestoreRecords);
+      },
+      (error) => {
+        console.error('Error listening to purchase requests:', error);
+      }
+    );
+
+    console.log('Real-time listener attached for purchase requests');
+  } catch (error) {
+    console.error('Error setting up real-time listener:', error);
+  }
+}
+
+/**
+ * Merge Firestore records with localStorage and refresh UI
+ */
+function syncRecordsFromFirestore(firestoreRecords) {
+  try {
+    // Get existing localStorage records
+    let localRecords = getDatabaseRecords();
+    
+    // Create a map of local records by ID for quick lookup
+    const localMap = {};
+    localRecords.forEach(r => {
+      if (r.firestoreId) localMap[r.firestoreId] = r;
+      if (r.id) localMap[r.id] = r;
+    });
+
+    // Update or add Firestore records to local storage
+    let hasChanges = false;
+    firestoreRecords.forEach(firestoreRecord => {
+      const existingKey = firestoreRecord.firestoreId || firestoreRecord.id;
+      const existingLocal = localMap[existingKey];
+
+      // If this is a new record or the Firestore one is newer, sync it
+      if (!existingLocal || new Date(firestoreRecord.timestamp) > new Date(existingLocal.timestamp)) {
+        // Remove old version if exists
+        localRecords = localRecords.filter(r => r.id !== firestoreRecord.id && r.id !== firestoreRecord.firestoreId);
+        // Add Firestore version
+        localRecords.unshift(firestoreRecord);
+        hasChanges = true;
+      }
+    });
+
+    if (hasChanges) {
+      setDatabaseRecords(localRecords);
+      lastSyncedRecords = firestoreRecords;
+      
+      // Refresh current view if records are displayed
+      const currentView = window.location.hash.replace('#', '') || 'new';
+      if (currentView === 'dashboard') {
+        applyDashboardFilters();
+        updateSummaryCards(getDatabaseRecords());
+      } else if (currentView === 'records') {
+        filterRecords();
+        updateRecordsYearFilter(getDatabaseRecords());
+      } else if (currentView === 'archive') {
+        filterArchive();
+      }
+      
+      console.log('Records synced from Firestore. Displaying', localRecords.length, 'total records');
+    }
+  } catch (error) {
+    console.error('Error syncing records from Firestore:', error);
+  }
+}
+
 async function resolveUserProfile(user) {
   if (!user || !user.email) return null;
 
@@ -390,6 +529,15 @@ async function handleAuthStateChanged(user) {
   if (user && currentUserProfile) {
     await saveUserProfileToFirestore(user);
     logAuditEvent('user_signin', { email: user.email });
+    
+    // Set up real-time sync listener for purchase requests
+    setupRealtimePurchaseRequestsListener();
+  } else {
+    // User signed out - unsubscribe from real-time listener
+    if (purchaseRequestsUnsubscribe) {
+      purchaseRequestsUnsubscribe();
+      purchaseRequestsUnsubscribe = null;
+    }
   }
   
   applyAuthState();
@@ -1814,6 +1962,10 @@ function persistFormData(formData) {
 
     records.unshift(updatedRecord);
     setDatabaseRecords(records);
+    
+    // Sync update to Firestore
+    saveRecordToFirestoreAsync(updatedRecord);
+    
     alert('Record updated successfully!');
     // Update UI lists
     updateSummaryCards(getDatabaseRecords());
@@ -1928,6 +2080,78 @@ function saveRecordToDatabase(formData) {
   }
   setDatabaseRecords(records);
   loadDatabaseRecords();
+  
+  // IMPORTANT: Also save to Firestore for real-time sync across devices
+  saveRecordToFirestoreAsync(record);
+}
+
+/**
+ * Save record to Firestore asynchronously (doesn't block the UI)
+ */
+async function saveRecordToFirestoreAsync(record) {
+  if (!currentAuthUser) {
+    console.warn('No authenticated user, skipping Firestore save');
+    return;
+  }
+
+  const db = getFirestoreInstance();
+  if (!db) {
+    console.warn('Firestore not available, record saved to localStorage only');
+    return;
+  }
+
+  try {
+    const recordData = {
+      prNumber: record.prNumber || record.id,
+      prDate: record.prDate,
+      department: record.department,
+      departmentCode: record.departmentCode,
+      section: record.section,
+      selectedArea: record.selectedArea,
+      selectedAreaLabel: record.selectedAreaLabel,
+      items: record.items || [],
+      grandTotal: record.grandTotal,
+      status: record.approvalStatus || 'pending',
+      purpose: record.purpose,
+      requestedByName: record.requestedByName,
+      recommendedByName: record.recommendedByName,
+      approvedByName: record.approvedByName,
+      requestedByDesignation: record.requestedByDesignation,
+      recommendedByDesignation: record.recommendedByDesignation,
+      approvedByDesignation: record.approvedByDesignation,
+      agency: record.agency,
+      saiNumber: record.saiNumber,
+      unit: record.unit,
+      pricePerSqFt: record.pricePerSqFt,
+      nature: record.nature,
+      size: record.size,
+      quantity: record.quantity,
+      cost: record.cost,
+      controlNumber: record.controlNumber,
+      footerVisible: record.footerVisible,
+      createdBy: {
+        uid: currentAuthUser.uid,
+        email: currentAuthUser.email,
+        name: currentUserProfile?.displayName,
+        role: currentUserProfile?.role,
+        office: currentUserProfile?.office
+      },
+      createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+    };
+
+    // Use document ID from record if available (for updates), otherwise let Firestore generate
+    if (record.firestoreId) {
+      await db.collection('purchaseRequests').doc(record.firestoreId).set(recordData, { merge: true });
+      console.log('Purchase request updated in Firestore:', record.firestoreId);
+    } else {
+      const docRef = await db.collection('purchaseRequests').add(recordData);
+      console.log('Purchase request saved to Firestore:', docRef.id);
+    }
+  } catch (error) {
+    console.error('Error saving to Firestore:', error);
+    // Don't alert user - the record is already in localStorage, just log the error
+  }
 }
 
 function loadDatabaseRecords() {
@@ -2510,6 +2734,10 @@ function approveRecord(recordId) {
   records[index].approvalBy = currentUserProfile?.displayName || 'Admin';
   records[index].approvalAt = new Date().toISOString();
   setDatabaseRecords(records);
+  
+  // Sync approval to Firestore
+  updateApprovalStatusInFirestore(records[index], 'approved');
+  
   initRecords();
   applyDashboardFilters();
   alert('Record approved successfully. Total purchase value is updated for approved requests.');
@@ -2524,9 +2752,35 @@ function rejectRecord(recordId) {
   records[index].approvalBy = currentUserProfile?.displayName || 'Admin';
   records[index].approvalAt = new Date().toISOString();
   setDatabaseRecords(records);
+  
+  // Sync rejection to Firestore
+  updateApprovalStatusInFirestore(records[index], 'rejected');
+  
   initRecords();
   applyDashboardFilters();
   alert('Record rejected successfully. It will no longer be counted as approved.');
+}
+
+/**
+ * Update approval status in Firestore
+ */
+async function updateApprovalStatusInFirestore(record, status) {
+  const db = getFirestoreInstance();
+  if (!db) return;
+
+  try {
+    const firestoreId = record.firestoreId || record.id;
+    await db.collection('purchaseRequests').doc(firestoreId).update({
+      status: status,
+      approvalStatus: status,
+      approvalBy: currentUserProfile?.displayName || 'Admin',
+      approvalAt: firebase.firestore.FieldValue.serverTimestamp(),
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+    console.log('Approval status synced to Firestore:', firestoreId);
+  } catch (error) {
+    console.error('Error updating Firestore approval status:', error);
+  }
 }
 
 function updateDashboardYearFilter(records) {
