@@ -1180,6 +1180,7 @@ function applyAuthState() {
   updateHeaderImage();
   updateSectionDefaultsForLhio();
   updateRecordsTableSchema();
+  updateDateFieldEditability();
   routeApp(window.location.hash || '#new');
   updateRecordsNotificationBadge();
 }
@@ -1635,6 +1636,15 @@ function setDate() {
     day: 'numeric'
   });
   prDateInput.value = formatted;
+}
+
+function updateDateFieldEditability() {
+  if (!prDateInput) return;
+  if (isAdminUser()) {
+    prDateInput.readOnly = false;
+  } else {
+    prDateInput.readOnly = true;
+  }
 }
 
 function clearAllData() {
@@ -4443,6 +4453,7 @@ function loadRecordIntoForm(record) {
   // Load basic form fields
   document.getElementById('prNumber').value = '';
   document.getElementById('prDate').value = record.prDate || '';
+  updateDateFieldEditability();
   let departmentCode = record.departmentCode || record.department || '';
   if (departmentCode && !DEPARTMENT_LABELS[departmentCode]) {
     departmentCode = resolveDepartmentCode(departmentCode);
