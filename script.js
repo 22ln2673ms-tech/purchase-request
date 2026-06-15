@@ -380,7 +380,7 @@ function setupRealtimePurchaseRequestsListener() {
           firestoreRecords.push({
             id: doc.id,
             firestoreId: doc.id,
-            prNumber: data.prNumber || `AUTO-${doc.id}`,
+            prNumber: data.prNumber || null,
             prDate: data.prDate,
             department: data.department,
             departmentCode: data.departmentCode,
@@ -452,7 +452,7 @@ async function fetchAndSyncFirestoreOnce() {
       firestoreRecords.push({
         id: doc.id,
         firestoreId: doc.id,
-        prNumber: data.prNumber || `AUTO-${doc.id}`,
+        prNumber: data.prNumber || null,
         prDate: data.prDate,
         department: data.department,
         departmentCode: data.departmentCode,
@@ -2370,7 +2370,7 @@ async function saveRecordToFirestoreAsync(record) {
 
   try {
     const recordData = {
-      prNumber: record.prNumber || record.id,
+      prNumber: record.prNumber || null,
       prDate: record.prDate,
       department: record.department,
       departmentCode: record.departmentCode,
@@ -3193,7 +3193,7 @@ async function updateApprovalStatusInFirestore(record, status) {
 
     // If no document found, create one to represent this record and set the status
     const recordData = {
-      prNumber: record.prNumber || record.id || null,
+      prNumber: record.prNumber || null,
       controlNumber: record.controlNumber || null,
       prDate: record.prDate || null,
       department: record.department || null,
